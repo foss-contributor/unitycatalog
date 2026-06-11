@@ -6,7 +6,6 @@ import io.unitycatalog.server.delta.model.DeltaCommit;
 import io.unitycatalog.server.delta.model.DeltaLoadTableResponse;
 import io.unitycatalog.server.delta.model.DeltaStructType;
 import io.unitycatalog.server.delta.model.DeltaTableMetadata;
-import io.unitycatalog.server.delta.model.DeltaTableType;
 import io.unitycatalog.server.delta.model.DeltaUniformMetadata;
 import io.unitycatalog.server.delta.model.DeltaUniformMetadataIceberg;
 import io.unitycatalog.server.delta.model.DeltaUpdateTableRequest;
@@ -29,8 +28,10 @@ import io.unitycatalog.server.persist.utils.ExternalLocationUtils;
 import io.unitycatalog.server.persist.utils.FileOperations;
 import io.unitycatalog.server.persist.utils.PagedListingHelper;
 import io.unitycatalog.server.persist.utils.RepositoryUtils;
+import io.unitycatalog.server.persist.utils.ShallowCloneUtils;
 import io.unitycatalog.server.persist.utils.TransactionManager;
 import io.unitycatalog.server.service.delta.DeltaConsts.TableProperties;
+import io.unitycatalog.server.service.delta.DeltaTableTypes;
 import io.unitycatalog.server.service.delta.DeltaUniformUtils;
 import io.unitycatalog.server.service.delta.DeltaUpdateTableMapper;
 import io.unitycatalog.server.service.delta.UcManagedDeltaContract;
@@ -125,6 +126,10 @@ public class TableRepository {
         /* readOnly = */ true);
   }
 
+  // Includes optional base table reference when the table is a shallow clone.
+  public record TableStorageLocations(
+      NormalizedURL tableLocation, Optional<ShallowCloneUtils.BaseTableRef> baseTable) {}
+
   /**
    * Looks up the storage location for a regular table by its three-part name. Only reads what the
    * caller actually needs (the storage URL) rather than hydrating the full {@link TableInfo} with
@@ -133,12 +138,14 @@ public class TableRepository {
    *
    * @throws BaseException with ErrorCode.TABLE_NOT_FOUND if no table exists at the given name.
    */
-  public NormalizedURL getTableStorageLocation(String catalog, String schema, String table) {
+  public TableStorageLocations getTableStorageLocations(
+      String catalog, String schema, String table) {
     return TransactionManager.executeWithTransaction(
         sessionFactory,
         session -> {
           TableInfoDAO dao = findTableOrThrow(session, catalog, schema, table);
-          return NormalizedURL.from(dao.getUrl());
+          return new TableStorageLocations(
+              NormalizedURL.from(dao.getUrl()), ShallowCloneUtils.getBaseTableRef(session, dao));
         },
         "Failed to get storage location of table " + catalog + "." + schema + "." + table,
         /* readOnly = */ true);
@@ -417,7 +424,8 @@ public class TableRepository {
       String table) {
     DeltaTableMetadata metadata = new DeltaTableMetadata();
     metadata.setEtag(DeltaUpdateTableMapper.computeEtag(dao));
-    metadata.setTableType(toDeltaTableType(dao.getType()));
+    metadata.setTableType(DeltaTableTypes.fromStored(dao.getType(), dao.getBaseTableId()));
+    metadata.setBaseTableId(dao.getBaseTableId());
     metadata.setTableUuid(dao.getId());
     metadata.setLocation(NormalizedURL.normalize(dao.getUrl()));
     metadata.setCreatedTime(dao.getCreatedAt() != null ? dao.getCreatedAt().getTime() : null);
@@ -544,10 +552,6 @@ public class TableRepository {
     response.setUniform(new DeltaUniformMetadata().iceberg(iceberg));
   }
 
-  private static DeltaTableType toDeltaTableType(String value) {
-    return DeltaTableType.fromValue(value);
-  }
-
   public String getTableUniformMetadataLocation(
       Session session, String catalogName, String schemaName, String tableName) {
     TableInfoDAO dao = findTableOrThrow(session, catalogName, schemaName, tableName);
@@ -568,7 +572,8 @@ public class TableRepository {
   }
 
   public TableInfo createTable(CreateTable createTable) {
-    return createTableImpl(createTable, Optional.empty(), (session, dao, tableInfo) -> tableInfo);
+    return createTableImpl(
+        createTable, Optional.empty(), Optional.empty(), (session, dao, tableInfo) -> tableInfo);
   }
 
   /**
@@ -581,12 +586,19 @@ public class TableRepository {
    * DeltaCreateTableMapper.toCreateTable}) are written onto the DAO before {@code session.persist},
    * so the create lands as a single INSERT carrying the uniform fields and the metadata-location is
    * normalized exactly once on this code path.
+   *
+   * <p>If {@code baseTableId} is non-empty the table is a shallow clone of that base table: the
+   * base is validated inside the create transaction and the id is written onto the DAO before
+   * {@code session.persist}, so the clone relationship lands in the same single INSERT.
    */
   public DeltaLoadTableResponse createTableForDelta(
-      CreateTable createTable, Optional<DeltaUniformUtils.UniformIcebergFields> uniformFields) {
+      CreateTable createTable,
+      Optional<DeltaUniformUtils.UniformIcebergFields> uniformFields,
+      Optional<UUID> baseTableId) {
     return createTableImpl(
         createTable,
         uniformFields,
+        baseTableId,
         (session, dao, tableInfo) ->
             buildLoadTableResponse(
                 session,
@@ -600,14 +612,16 @@ public class TableRepository {
   /**
    * Shared implementation for the two {@code create} entry points. Validates the name, opens a
    * write transaction, builds the new {@link TableInfoDAO} (row, columns, properties), applies
-   * UniForm Iceberg metadata when {@code uniformFields} is non-empty, persists the DAO, then hands
-   * it and the built {@link TableInfo} to {@code mapper} which picks the return shape each caller
-   * needs. Keeps the create path as a single operation, and pins all DAO setters before {@code
-   * session.persist} so the create lands as a single INSERT.
+   * UniForm Iceberg metadata when {@code uniformFields} is non-empty and the shallow-clone base
+   * table id when {@code baseTableId} is non-empty, persists the DAO, then hands it and the built
+   * {@link TableInfo} to {@code mapper} which picks the return shape each caller needs. Keeps the
+   * create path as a single operation, and pins all DAO setters before {@code session.persist} so
+   * the create lands as a single INSERT.
    */
   private <T> T createTableImpl(
       CreateTable createTable,
       Optional<DeltaUniformUtils.UniformIcebergFields> uniformFields,
+      Optional<UUID> baseTableId,
       CreateResultMapper<T> mapper) {
     ValidationUtils.validateSqlObjectName(createTable.getName());
     String callerId = IdentityUtils.findPrincipalEmailAddress();
@@ -722,6 +736,12 @@ public class TableRepository {
           // UniForm Iceberg fields (when supplied by the Delta create path) are written while the
           // entity is still transient so they're folded into the single INSERT below.
           DeltaUniformUtils.applyToDao(tableInfoDAO, uniformFields);
+          // Shallow-clone base table: validated in the same transaction, stamped pre-persist.
+          baseTableId.ifPresent(
+              baseId -> {
+                ShallowCloneUtils.validateBaseTable(session, baseId, tableType);
+                tableInfoDAO.setBaseTableId(baseId);
+              });
           session.persist(tableInfoDAO);
           if (tableType == TableType.METRIC_VIEW) {
             DependencyDAO.DependentType dependentType = DependencyDAO.DependentType.TABLE;
@@ -870,6 +890,7 @@ public class TableRepository {
     if (tableInfoDAO == null) {
       throw new BaseException(ErrorCode.TABLE_NOT_FOUND, "Table not found: " + tableName);
     }
+    ShallowCloneUtils.validateNoActiveClones(session, tableInfoDAO);
     if (TableType.MANAGED.getValue().equals(tableInfoDAO.getType())) {
       try {
         FileOperations.deleteDirectory(NormalizedURL.from(tableInfoDAO.getUrl()));

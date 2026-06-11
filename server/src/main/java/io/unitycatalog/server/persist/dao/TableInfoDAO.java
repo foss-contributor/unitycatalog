@@ -28,6 +28,8 @@ import lombok.experimental.SuperBuilder;
     name = "uc_tables",
     indexes = {
       @Index(name = "idx_name", columnList = "name"),
+      // Reverse clone lookup: drop protection checks for shallow clones on delete.
+      @Index(name = "idx_base_table_id", columnList = "base_table_id"),
     })
 // Lombok annotations
 @Getter
@@ -80,6 +82,10 @@ public class TableInfoDAO extends IdentifiableDAO {
   @Lob
   @Column(name = "view_definition", length = 16777215)
   private String viewDefinition;
+
+  // Table UUID of the base table when this table is a shallow clone; {@code null} otherwise.
+  @Column(name = "base_table_id")
+  private UUID baseTableId;
 
   @Column(name = "uniform_iceberg_metadata_location", length = 65535)
   private String uniformIcebergMetadataLocation;

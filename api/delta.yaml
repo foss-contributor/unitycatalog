@@ -195,7 +195,8 @@ paths:
       operationId: createTable
       summary: Create a table
       description: |
-        Create a new Delta table in the specified schema.
+        Create a new Delta table in the specified schema. Supports MANAGED, EXTERNAL, and
+        MANAGED_SHALLOW_CLONE tables. EXTERNAL_SHALLOW_CLONE is not yet supported.
       requestBody:
         required: true
         content:
@@ -297,10 +298,13 @@ paths:
       operationId: deleteTable
       summary: Delete a table
       description: |
-        Delete a table from the catalog.
+        Delete a table from the catalog. Deleting a table that is the base of shallow
+        clones is rejected; the clones must be deleted first.
       responses:
         '204':
           description: Table deleted successfully
+        '400':
+          $ref: '#/components/responses/BadRequestErrorResponse'
         '401':
           $ref: '#/components/responses/UnauthorizedResponse'
         '403':
@@ -333,6 +337,9 @@ paths:
       description: |
         Get temporary credentials for accessing table data (vended credentials).
         The operation parameter controls the access level.
+
+        For a shallow clone the response carries an additional READ-scoped credential for the
+        base table's storage location, if the the requestor has read access to the base table.
       parameters:
         - name: operation
           in: query
@@ -525,10 +532,20 @@ components:
 
     DeltaTableType:
       type: string
-      description: The type of a Delta table.
+      description: |
+        The type of a Delta table.
+
+        The shallow-clone types identify tables created via `CREATE TABLE ... SHALLOW CLONE`:
+        their Delta log references data files in the base table's storage location, and the
+        clone relationship is carried by `base-table-id` on the create request and table
+        metadata. A MANAGED_SHALLOW_CLONE table behaves like a MANAGED table in every other
+        respect. EXTERNAL_SHALLOW_CLONE is not yet supported; createTable rejects it with
+        NotImplementedException.
       enum:
         - MANAGED
         - EXTERNAL
+        - MANAGED_SHALLOW_CLONE
+        - EXTERNAL_SHALLOW_CLONE
 
     DeltaCredentialOperation:
       type: string
@@ -695,6 +712,14 @@ components:
           description: Storage location
         table-type:
           $ref: '#/components/schemas/DeltaTableType'
+        base-table-id:
+          type: string
+          format: uuid
+          description: |
+            Table UUID of the base table this table is a shallow clone of. Required for
+            shallow-clone table types; must be absent otherwise. The base table must be an
+            existing Delta table in the same metastore with the matching table type
+            (MANAGED for MANAGED_SHALLOW_CLONE), and must not be a shallow clone.
         comment:
           type: string
           description: Table comment
@@ -799,6 +824,12 @@ components:
           type: string
           format: uuid
           description: Unique identifier for the table
+        base-table-id:
+          type: string
+          format: uuid
+          description: |
+            Table UUID of the base table this table is a shallow clone of.
+            Present only for shallow-clone table types.
         location:
           type: string
           description: Storage location of the table
