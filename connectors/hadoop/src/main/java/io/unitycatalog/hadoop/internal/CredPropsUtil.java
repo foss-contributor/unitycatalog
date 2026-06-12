@@ -14,9 +14,12 @@ import io.unitycatalog.client.model.TableOperation;
 import io.unitycatalog.client.model.TemporaryCredentials;
 import io.unitycatalog.hadoop.UCCredentialHadoopConfs;
 import io.unitycatalog.hadoop.internal.auth.GenericCredentialFetcher;
+import io.unitycatalog.hadoop.internal.auth.ScopedCredential;
+import io.unitycatalog.hadoop.internal.fs.CredentialScopes;
 import java.net.URI;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import org.apache.hadoop.conf.Configuration;
@@ -831,20 +834,63 @@ public class CredPropsUtil {
     reqConf.set(UCHadoopConfConstants.UC_DELTA_SCHEMA_KEY, identifier.schema());
     reqConf.set(UCHadoopConfConstants.UC_DELTA_TABLE_NAME_KEY, identifier.table());
     reqConf.set(UCHadoopConfConstants.UC_DELTA_LOCATION_KEY, location);
-    TemporaryCredentials creds =
-        fetchTemporaryCredentials(apiClient, catalogUri, tokenProvider, appVersions, reqConf);
-    return createDeltaTableCredProps(
-        renewCredEnabled,
-        credScopedFsEnabled,
-        hadoopConf,
-        scheme,
-        catalogUri,
-        tokenProvider,
-        identifier,
-        location,
-        DeltaCredentialOperation.fromValue(tableOp.value()),
-        creds,
-        appVersions);
+    ApiClient client =
+        apiClient != null ? apiClient : createApiClient(catalogUri, tokenProvider, appVersions);
+    GenericCredentialFetcher fetcher = genericCredFetcherFactory.create(client, reqConf);
+    TemporaryCredentials creds = fetcher.createCredential().temporaryCredentials();
+    Map<String, String> props =
+        createDeltaTableCredProps(
+            renewCredEnabled,
+            credScopedFsEnabled,
+            hadoopConf,
+            scheme,
+            catalogUri,
+            tokenProvider,
+            identifier,
+            location,
+            DeltaCredentialOperation.fromValue(tableOp.value()),
+            creds,
+            appVersions);
+    // Every vended scope must be usable at once: a shallow clone's log lives under its own
+    // location while its AddFiles point into the base table's, so the base's READ credential
+    // must be applied alongside the table's own.
+    List<ScopedCredential> additionalScopes = fetcher.additionalScopedCredentials();
+    if (additionalScopes.isEmpty()) {
+      return props;
+    }
+    Map<String, String> merged = new HashMap<>(props);
+    // Cross-bucket fallback usable by plain S3A when the credential-scoped FileSystem is off.
+    merged.putAll(DeltaStorageCredentialUtil.perBucketS3CredProps(additionalScopes, location));
+    // Full per-scope properties for the credential-scoped FileSystem: prefix-based selection
+    // (covers scopes sharing a bucket), any cloud scheme, and -- in renewal mode -- a provider
+    // whose refresh re-selects this scope's entry, so secondary credentials renew like the
+    // table's own.
+    int index = 0;
+    for (ScopedCredential scope : additionalScopes) {
+      Map<String, String> scopeProps =
+          createDeltaTableCredProps(
+              renewCredEnabled,
+              /* credScopedFsEnabled= */ false,
+              hadoopConf,
+              schemeForCredProps(scope.prefix()),
+              catalogUri,
+              tokenProvider,
+              identifier,
+              scope.prefix(),
+              DeltaCredentialOperation.fromValue(scope.operation()),
+              scope.credentials(),
+              appVersions);
+      CredentialScopes.encode(merged, index, scope.prefix(), scopeProps);
+      index++;
+    }
+    merged.put(UCHadoopConfConstants.UC_CRED_SCOPE_COUNT_KEY, String.valueOf(index));
+    return Collections.unmodifiableMap(merged);
+  }
+
+  /** The props-builder scheme for a location: s3-family schemes collapse onto {@code s3}. */
+  private static String schemeForCredProps(String location) {
+    String scheme = URI.create(location).getScheme();
+    return scheme != null && scheme.startsWith("s3") ? "s3" : scheme;
   }
 
   /**

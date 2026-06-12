@@ -7,7 +7,12 @@ import io.unitycatalog.client.model.AwsCredentials;
 import io.unitycatalog.client.model.AzureUserDelegationSAS;
 import io.unitycatalog.client.model.GcpOauthToken;
 import io.unitycatalog.client.model.TemporaryCredentials;
+import io.unitycatalog.hadoop.internal.auth.ScopedCredential;
+import java.net.URI;
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 /** Internal utility for UC Delta storage credentials. */
 public final class DeltaStorageCredentialUtil {
@@ -34,6 +39,66 @@ public final class DeltaStorageCredentialUtil {
               .oauthToken(field(config.getGcsOauthToken(), cred, "GCS OAuth token")));
     }
     return out;
+  }
+
+  private static final String S3A_BUCKET_PREFIX = "fs.s3a.bucket.";
+
+  /** Cloud schemes the connector can translate into Hadoop credential properties. */
+  private static boolean isSupportedCloudScheme(String scheme) {
+    return scheme != null
+        && (scheme.startsWith("s3")
+            || scheme.equals("gs")
+            || scheme.equals("abfs")
+            || scheme.equals("abfss"));
+  }
+
+  /**
+   * Converts every credential in {@code creds} other than {@code primary} into a {@link
+   * ScopedCredential}, skipping prefixes the connector cannot translate (e.g. local paths).
+   */
+  public static List<ScopedCredential> toAdditionalScopedCredentials(
+      DeltaStorageCredential primary, List<DeltaStorageCredential> creds) {
+    List<ScopedCredential> scoped = new ArrayList<>();
+    for (DeltaStorageCredential cred : creds) {
+      if (cred == null || cred == primary || cred.getPrefix() == null) {
+        continue;
+      }
+      if (!isSupportedCloudScheme(URI.create(cred.getPrefix()).getScheme())) {
+        continue;
+      }
+      String operation = cred.getOperation() == null ? "READ" : cred.getOperation().getValue();
+      scoped.add(new ScopedCredential(cred.getPrefix(), operation, toTemporaryCredentials(cred)));
+    }
+    return scoped;
+  }
+
+  /**
+   * Per-bucket S3A credential properties for every s3-prefixed scope in a different bucket than
+   * {@code tableLocation}, so cross-bucket scopes are usable by plain S3A even without the
+   * credential-scoped FileSystem. Scopes sharing the table's bucket are skipped — per-bucket keys
+   * there would override the table's own credentials; only the credential-scoped FileSystem can
+   * separate same-bucket scopes. Non-AWS scopes are skipped.
+   */
+  public static Map<String, String> perBucketS3CredProps(
+      List<ScopedCredential> scopes, String tableLocation) {
+    String tableBucket = tableLocation == null ? null : URI.create(tableLocation).getHost();
+    Map<String, String> props = new HashMap<>();
+    for (ScopedCredential scope : scopes) {
+      URI uri = URI.create(scope.prefix());
+      String scheme = uri.getScheme();
+      String bucket = uri.getHost();
+      AwsCredentials aws = scope.credentials().getAwsTempCredentials();
+      if (scheme == null || !scheme.startsWith("s3") || bucket == null || aws == null) {
+        continue;
+      }
+      if (bucket.equals(tableBucket)) {
+        continue;
+      }
+      props.put(S3A_BUCKET_PREFIX + bucket + ".access.key", aws.getAccessKeyId());
+      props.put(S3A_BUCKET_PREFIX + bucket + ".secret.key", aws.getSecretAccessKey());
+      props.put(S3A_BUCKET_PREFIX + bucket + ".session.token", aws.getSessionToken());
+    }
+    return props;
   }
 
   /** Selects the credential whose prefix covers the requested location. */
@@ -64,7 +129,7 @@ public final class DeltaStorageCredentialUtil {
     return best;
   }
 
-  static boolean prefixCovers(String location, String prefix) {
+  public static boolean prefixCovers(String location, String prefix) {
     String l = stripTrailingSlashes(location);
     String p = stripTrailingSlashes(prefix);
     return !p.isEmpty() && (l.equals(p) || (l.startsWith(p) && l.charAt(p.length()) == '/'));
