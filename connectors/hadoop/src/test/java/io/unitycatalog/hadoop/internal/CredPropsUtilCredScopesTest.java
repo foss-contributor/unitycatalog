@@ -76,7 +76,7 @@ class CredPropsUtilCredScopesTest {
   }
 
   @Test
-  void emitsPerBucketKeysAndRenewableScopeForCrossBucketCredential() throws Exception {
+  void emitsRenewableScopeForAdditionalCredential() throws Exception {
     stubFetcher(
         List.of(
             new ScopedCredential(
@@ -84,10 +84,8 @@ class CredPropsUtilCredScopesTest {
 
     Map<String, String> props = fetch(true);
 
-    // Cross-bucket fallback for plain S3A.
-    assertThat(props).containsEntry("fs.s3a.bucket.base-bucket.access.key", "baseAk");
-    assertThat(props).containsEntry("fs.s3a.bucket.base-bucket.secret.key", "baseSk");
-    assertThat(props).containsEntry("fs.s3a.bucket.base-bucket.session.token", "baseSt");
+    // Scopes are the only multi-credential channel; no cloud-specific fallback keys.
+    assertThat(props.keySet()).noneMatch(k -> k.startsWith("fs.s3a.bucket."));
 
     // Full scope for the credential-scoped FileSystem. The provider config points at the base
     // prefix with the base entry's operation, so its refreshes re-select the base credential.
@@ -106,7 +104,7 @@ class CredPropsUtilCredScopesTest {
   }
 
   @Test
-  void sameBucketScopeSkipsPerBucketKeysButKeepsTheScope() throws Exception {
+  void sameBucketScopeIsEncodedLikeAnyOther() throws Exception {
     stubFetcher(
         List.of(
             new ScopedCredential(
@@ -114,9 +112,8 @@ class CredPropsUtilCredScopesTest {
 
     Map<String, String> props = fetch(false);
 
-    // Per-bucket keys for the table's own bucket would shadow its own credentials.
-    assertThat(props).doesNotContainKey("fs.s3a.bucket.clone-bucket.access.key");
-    // The scope still carries the credential; static mode embeds it as fixed keys.
+    // Scope selection is prefix-based, so sharing the table's bucket changes nothing; static
+    // mode embeds the credential as fixed keys.
     String propNs =
         UCHadoopConfConstants.UC_CRED_SCOPE_PREFIX
             + 0

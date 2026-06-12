@@ -23,6 +23,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import org.apache.hadoop.conf.Configuration;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Internal utility that builds cloud-provider specific Hadoop configuration properties for Unity
@@ -33,6 +35,8 @@ import org.apache.hadoop.conf.Configuration;
  */
 public class CredPropsUtil {
   private CredPropsUtil() {}
+
+  private static final Logger LOG = LoggerFactory.getLogger(CredPropsUtil.class);
 
   /**
    * Factory seam for {@link GenericCredentialFetcher#create(ApiClient, Configuration)}, swappable
@@ -858,9 +862,17 @@ public class CredPropsUtil {
     if (additionalScopes.isEmpty()) {
       return props;
     }
+    if (!credScopedFsEnabled) {
+      LOG.warn(
+          "Table {}.{}.{} has {} additional credential scope(s) but credScopedFs.enabled is"
+              + " false; reads outside the table's own location will fail. Enable the"
+              + " credential-scoped FileSystem to use all vended credentials.",
+          identifier.catalog(),
+          identifier.schema(),
+          identifier.table(),
+          additionalScopes.size());
+    }
     Map<String, String> merged = new HashMap<>(props);
-    // Cross-bucket fallback usable by plain S3A when the credential-scoped FileSystem is off.
-    merged.putAll(DeltaStorageCredentialUtil.perBucketS3CredProps(additionalScopes, location));
     // Full per-scope properties for the credential-scoped FileSystem: prefix-based selection
     // (covers scopes sharing a bucket), any cloud scheme, and -- in renewal mode -- a provider
     // whose refresh re-selects this scope's entry, so secondary credentials renew like the
