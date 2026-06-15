@@ -65,6 +65,38 @@ class CredentialScopesTest {
   }
 
   @Test
+  void selectConfOverlaysAnyCloudScopeByPrefix() {
+    // Selection is pure prefix matching and the overlay copies arbitrary keys, so an S3, GCS,
+    // and Azure scope coexist in one conf and each path selects its own cloud's credential.
+    Map<String, String> props = new HashMap<>();
+    CredentialScopes.encode(props, 0, "s3://bucket/s3base", Map.of("fs.s3a.access.key", "s3Key"));
+    CredentialScopes.encode(
+        props, 1, "gs://bucket/gsbase", Map.of("fs.gs.auth.access.token.credential", "gsTok"));
+    CredentialScopes.encode(
+        props,
+        2,
+        "abfss://container@account.dfs.core.windows.net/abfsbase",
+        Map.of("fs.azure.sas.fixed.token", "abfsSas"));
+    props.put(UCHadoopConfConstants.UC_CRED_SCOPE_COUNT_KEY, "3");
+    Configuration conf = new Configuration(false);
+    props.forEach(conf::set);
+
+    assertThat(
+            CredentialScopes.selectConf(URI.create("s3://bucket/s3base/f"), conf)
+                .get("fs.s3a.access.key"))
+        .isEqualTo("s3Key");
+    assertThat(
+            CredentialScopes.selectConf(URI.create("gs://bucket/gsbase/f"), conf)
+                .get("fs.gs.auth.access.token.credential"))
+        .isEqualTo("gsTok");
+    assertThat(
+            CredentialScopes.selectConf(
+                    URI.create("abfss://container@account.dfs.core.windows.net/abfsbase/f"), conf)
+                .get("fs.azure.sas.fixed.token"))
+        .isEqualTo("abfsSas");
+  }
+
+  @Test
   void overlaidScopeYieldsADistinctCredScopedKey() {
     Configuration conf = new Configuration(false);
     conf.set(
