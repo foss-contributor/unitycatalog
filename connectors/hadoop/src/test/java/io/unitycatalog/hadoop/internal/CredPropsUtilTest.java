@@ -16,6 +16,8 @@ import io.unitycatalog.client.model.TemporaryCredentials;
 import io.unitycatalog.hadoop.UCCredentialHadoopConfs;
 import io.unitycatalog.hadoop.internal.auth.GenericCredential;
 import io.unitycatalog.hadoop.internal.auth.GenericCredentialFetcher;
+import io.unitycatalog.hadoop.internal.auth.ScopedCredential;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 import org.apache.hadoop.conf.Configuration;
@@ -828,6 +830,123 @@ class CredPropsUtilTest {
     assertThat(props).containsEntry(UCHadoopConfConstants.S3A_INIT_ACCESS_KEY, "ak");
   }
 
+  // Multi-location credential scopes: an additional vended credential is run through the same
+  // per-cloud builder as the table's own and parked under the credscope namespace, for S3, GCS,
+  // and Azure alike (so the scope mechanism is cloud-agnostic).
+
+  @Test
+  void deltaScopeEmitsRenewableS3Provider() throws Exception {
+    Map<String, String> props =
+        fetchDeltaWithScopes(
+            true,
+            "s3",
+            "s3://clone-bucket/tables/clone",
+            s3Creds(),
+            List.of(new ScopedCredential("s3://base-bucket/tables/base", "READ", s3Creds())));
+
+    // Scopes are the only multi-credential channel; no cloud-specific fallback keys.
+    assertThat(props.keySet()).noneMatch(k -> k.startsWith("fs.s3a.bucket."));
+    assertThat(props).containsEntry(UCHadoopConfConstants.UC_CRED_SCOPE_COUNT_KEY, "1");
+    assertThat(props)
+        .containsEntry(
+            UCHadoopConfConstants.UC_CRED_SCOPE_PREFIX
+                + 0
+                + UCHadoopConfConstants.UC_CRED_SCOPE_PREFIX_SUFFIX,
+            "s3://base-bucket/tables/base");
+    String propNs = scopePropNs(0);
+    assertThat(props)
+        .containsEntry(
+            propNs + UCHadoopConfConstants.UC_DELTA_LOCATION_KEY, "s3://base-bucket/tables/base");
+    assertThat(props).containsEntry(propNs + UCHadoopConfConstants.UC_TABLE_OPERATION_KEY, "READ");
+    assertThat(props).containsEntry(propNs + UCHadoopConfConstants.S3A_INIT_ACCESS_KEY, "ak");
+    assertThat(props.get(propNs + UCHadoopConfConstants.S3A_CREDENTIALS_PROVIDER)).isNotNull();
+  }
+
+  @Test
+  void deltaSameBucketScopeIsEncodedLikeAnyOther() throws Exception {
+    // Selection is prefix-based, so sharing the table's bucket changes nothing; static mode
+    // embeds the credential as fixed keys.
+    Map<String, String> props =
+        fetchDeltaWithScopes(
+            false,
+            "s3",
+            "s3://clone-bucket/tables/clone",
+            s3Creds(),
+            List.of(new ScopedCredential("s3://clone-bucket/tables/base", "READ", s3Creds())));
+    assertThat(props).containsEntry(scopePropNs(0) + "fs.s3a.access.key", "ak");
+  }
+
+  @Test
+  void deltaScopeEmitsRenewableGcsProvider() throws Exception {
+    Map<String, String> props =
+        fetchDeltaWithScopes(
+            true,
+            "gs",
+            "gs://clone-bucket/tables/clone",
+            gcsCreds(),
+            List.of(new ScopedCredential("gs://base-bucket/tables/base", "READ", gcsCreds())));
+
+    assertThat(props).containsEntry(UCHadoopConfConstants.UC_CRED_SCOPE_COUNT_KEY, "1");
+    String propNs = scopePropNs(0);
+    assertThat(props).containsEntry(propNs + "fs.gs.auth.type", "ACCESS_TOKEN_PROVIDER");
+    assertThat(props.get(propNs + "fs.gs.auth.access.token.provider")).isNotNull();
+    assertThat(props).containsEntry(propNs + UCHadoopConfConstants.GCS_INIT_OAUTH_TOKEN, "token");
+  }
+
+  @Test
+  void deltaScopeEmitsStaticGcsToken() throws Exception {
+    Map<String, String> props =
+        fetchDeltaWithScopes(
+            false,
+            "gs",
+            "gs://clone-bucket/tables/clone",
+            gcsCreds(),
+            List.of(new ScopedCredential("gs://base-bucket/tables/base", "READ", gcsCreds())));
+    assertThat(props).containsEntry(scopePropNs(0) + "fs.gs.auth.access.token.credential", "token");
+  }
+
+  @Test
+  void deltaScopeEmitsRenewableAbfsProvider() throws Exception {
+    String base = "abfss://container@account.dfs.core.windows.net/base";
+    Map<String, String> props =
+        fetchDeltaWithScopes(
+            true,
+            "abfss",
+            "abfss://container@account.dfs.core.windows.net/clone",
+            abfsCreds(),
+            List.of(new ScopedCredential(base, "READ", abfsCreds())));
+
+    assertThat(props).containsEntry(UCHadoopConfConstants.UC_CRED_SCOPE_COUNT_KEY, "1");
+    String propNs = scopePropNs(0);
+    assertThat(props)
+        .containsEntry(
+            propNs + UCHadoopConfConstants.FS_AZURE_ACCOUNT_AUTH_TYPE_PROPERTY_NAME, "SAS");
+    assertThat(props.get(propNs + UCHadoopConfConstants.FS_AZURE_SAS_TOKEN_PROVIDER_TYPE))
+        .isNotNull();
+    assertThat(props).containsEntry(propNs + UCHadoopConfConstants.AZURE_INIT_SAS_TOKEN, "sas");
+  }
+
+  @Test
+  void deltaScopeEmitsStaticAbfsToken() throws Exception {
+    String base = "abfss://container@account.dfs.core.windows.net/base";
+    Map<String, String> props =
+        fetchDeltaWithScopes(
+            false,
+            "abfss",
+            "abfss://container@account.dfs.core.windows.net/clone",
+            abfsCreds(),
+            List.of(new ScopedCredential(base, "READ", abfsCreds())));
+    assertThat(props).containsEntry(scopePropNs(0) + "fs.azure.sas.fixed.token", "sas");
+  }
+
+  @Test
+  void deltaNoScopesLeavesPropsUntouched() throws Exception {
+    Map<String, String> props =
+        fetchDeltaWithScopes(true, "s3", "s3://clone-bucket/tables/clone", s3Creds(), List.of());
+    assertThat(props.keySet())
+        .noneMatch(k -> k.startsWith(UCHadoopConfConstants.UC_CRED_SCOPE_PREFIX));
+  }
+
   @Test
   void fetchPathCredPropsAssemblesReqConfAndReturnsCredProps() throws Exception {
     AtomicReference<Configuration> captured = new AtomicReference<>();
@@ -1016,6 +1135,42 @@ class CredPropsUtilTest {
       throw new RuntimeException(e);
     }
     return api;
+  }
+
+  private static GenericCredentialFetcher mockGenericCredentialFetcher(
+      TemporaryCredentials creds, List<ScopedCredential> scopes) {
+    GenericCredentialFetcher api = mockGenericCredentialFetcher(creds);
+    when(api.additionalScopedCredentials()).thenReturn(scopes);
+    return api;
+  }
+
+  private static Map<String, String> fetchDeltaWithScopes(
+      boolean renewCredEnabled,
+      String scheme,
+      String tableLocation,
+      TemporaryCredentials primary,
+      List<ScopedCredential> scopes)
+      throws Exception {
+    CredPropsUtil.genericCredFetcherFactory =
+        (apiClient, conf) -> mockGenericCredentialFetcher(primary, scopes);
+    return CredPropsUtil.fetchDeltaTableCredProps(
+        renewCredEnabled,
+        false,
+        new Configuration(false),
+        scheme,
+        null,
+        "http://uc",
+        tokenProvider(),
+        UCDeltaTableIdentifier.of("cat", "sch", "clone"),
+        tableLocation,
+        UCCredentialHadoopConfs.TableOperation.READ_WRITE,
+        Map.of());
+  }
+
+  private static String scopePropNs(int index) {
+    return UCHadoopConfConstants.UC_CRED_SCOPE_PREFIX
+        + index
+        + UCHadoopConfConstants.UC_CRED_SCOPE_PROP_SUFFIX;
   }
 
   private static TokenProvider tokenProvider() {
