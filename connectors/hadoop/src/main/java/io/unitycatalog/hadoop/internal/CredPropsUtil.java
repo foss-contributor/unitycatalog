@@ -838,9 +838,8 @@ public class CredPropsUtil {
     reqConf.set(UCHadoopConfConstants.UC_DELTA_SCHEMA_KEY, identifier.schema());
     reqConf.set(UCHadoopConfConstants.UC_DELTA_TABLE_NAME_KEY, identifier.table());
     reqConf.set(UCHadoopConfConstants.UC_DELTA_LOCATION_KEY, location);
-    ApiClient client =
-        apiClient != null ? apiClient : createApiClient(catalogUri, tokenProvider, appVersions);
-    GenericCredentialFetcher fetcher = genericCredFetcherFactory.create(client, reqConf);
+    GenericCredentialFetcher fetcher =
+        createFetcher(apiClient, catalogUri, tokenProvider, appVersions, reqConf);
     TemporaryCredentials creds = fetcher.createCredential().temporaryCredentials();
     Map<String, String> props =
         createDeltaTableCredProps(
@@ -981,12 +980,24 @@ public class CredPropsUtil {
       Map<String, String> appVersions,
       Configuration reqConf)
       throws ApiException {
-    ApiClient client =
-        apiClient != null ? apiClient : createApiClient(catalogUri, tokenProvider, appVersions);
-    return genericCredFetcherFactory
-        .create(client, reqConf)
+    return createFetcher(apiClient, catalogUri, tokenProvider, appVersions, reqConf)
         .createCredential()
         .temporaryCredentials();
+  }
+
+  /**
+   * Builds the credential fetcher for {@code reqConf}, reusing the caller-supplied {@code
+   * apiClient} or creating one when absent. 
+   */
+  private static GenericCredentialFetcher createFetcher(
+      ApiClient apiClient,
+      String catalogUri,
+      TokenProvider tokenProvider,
+      Map<String, String> appVersions,
+      Configuration reqConf) {
+    ApiClient client =
+        apiClient != null ? apiClient : createApiClient(catalogUri, tokenProvider, appVersions);
+    return genericCredFetcherFactory.create(client, reqConf);
   }
 
   private static ApiClient createApiClient(
