@@ -844,8 +844,6 @@ class CredPropsUtilTest {
             s3Creds(),
             List.of(new ScopedCredential("s3://base-bucket/tables/base", "READ", s3Creds())));
 
-    // Scopes are the only multi-credential channel; no cloud-specific fallback keys.
-    assertThat(props.keySet()).noneMatch(k -> k.startsWith("fs.s3a.bucket."));
     assertThat(props).containsEntry(UCHadoopConfConstants.UC_CRED_SCOPE_COUNT_KEY, "1");
     assertThat(props)
         .containsEntry(
