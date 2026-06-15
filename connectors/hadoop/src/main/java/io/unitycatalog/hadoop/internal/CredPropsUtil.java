@@ -987,7 +987,7 @@ public class CredPropsUtil {
 
   /**
    * Builds the credential fetcher for {@code reqConf}, reusing the caller-supplied {@code
-   * apiClient} or creating one when absent. 
+   * apiClient} or creating one when absent.
    */
   private static GenericCredentialFetcher createFetcher(
       ApiClient apiClient,
