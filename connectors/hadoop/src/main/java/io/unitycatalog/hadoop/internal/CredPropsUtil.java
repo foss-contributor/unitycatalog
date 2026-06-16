@@ -883,7 +883,7 @@ public class CredPropsUtil {
               renewCredEnabled,
               /* credScopedFsEnabled= */ false,
               hadoopConf,
-              schemeForCredProps(scope.prefix()),
+              URI.create(scope.prefix()).getScheme(),
               catalogUri,
               tokenProvider,
               identifier,
@@ -896,12 +896,6 @@ public class CredPropsUtil {
     }
     merged.put(UCHadoopConfConstants.UC_CRED_SCOPE_COUNT_KEY, String.valueOf(index));
     return Collections.unmodifiableMap(merged);
-  }
-
-  /** The props-builder scheme for a location: s3-family schemes collapse onto {@code s3}. */
-  private static String schemeForCredProps(String location) {
-    String scheme = URI.create(location).getScheme();
-    return scheme != null && scheme.startsWith("s3") ? "s3" : scheme;
   }
 
   /**
