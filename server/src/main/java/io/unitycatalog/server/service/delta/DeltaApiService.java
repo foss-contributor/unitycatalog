@@ -26,6 +26,7 @@ import io.unitycatalog.server.delta.model.DeltaCredentialOperation;
 import io.unitycatalog.server.delta.model.DeltaCredentialsResponse;
 import io.unitycatalog.server.delta.model.DeltaLoadTableResponse;
 import io.unitycatalog.server.delta.model.DeltaStagingTableResponse;
+import io.unitycatalog.server.delta.model.DeltaStorageCredential;
 import io.unitycatalog.server.delta.model.DeltaTableType;
 import io.unitycatalog.server.delta.model.DeltaUpdateTableRequest;
 import io.unitycatalog.server.exception.BaseException;
@@ -39,12 +40,15 @@ import io.unitycatalog.server.persist.Repositories;
 import io.unitycatalog.server.persist.SchemaRepository;
 import io.unitycatalog.server.persist.StagingTableRepository;
 import io.unitycatalog.server.persist.TableRepository;
+import io.unitycatalog.server.persist.utils.ShallowCloneUtils;
 import io.unitycatalog.server.service.AuthorizedService;
 import io.unitycatalog.server.service.credential.CredentialContext;
 import io.unitycatalog.server.service.credential.StorageCredentialVendor;
 import io.unitycatalog.server.utils.NormalizedURL;
 import io.unitycatalog.server.utils.ServerProperties;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
@@ -181,11 +185,13 @@ public class DeltaApiService extends AuthorizedService {
   // ==================== Create Table API ====================
 
   /**
-   * Create a Delta table. Both MANAGED and EXTERNAL are supported (at feature parity with the UC
-   * {@code TableService.createTable}). For MANAGED, the caller must have previously called {@code
-   * POST /staging-tables}, written the initial Delta commit at the returned staging location, and
-   * passes that same location back here. For EXTERNAL, the caller supplies any storage location
-   * they have rights on.
+   * Create a Delta table. MANAGED, EXTERNAL, and MANAGED_SHALLOW_CLONE are supported;
+   * EXTERNAL_SHALLOW_CLONE is rejected as not implemented. For MANAGED, the caller must have
+   * previously called {@code POST /staging-tables}, written the initial Delta commit at the
+   * returned staging location, and passes that same location back here. For EXTERNAL, the caller
+   * supplies any storage location they have rights on. MANAGED_SHALLOW_CLONE follows the MANAGED
+   * staging flow and additionally carries the base table's UUID in {@code base-table-id} (see
+   * {@link DeltaTableTypes}).
    *
    * <p>OWNER is the createTable-caller in both branches, matching UC REST {@code
    * TableService.createTable}. EXTERNAL wires it via the {@code
@@ -208,7 +214,7 @@ public class DeltaApiService extends AuthorizedService {
     DeltaCreateTableMapper.Result mapped =
         DeltaCreateTableMapper.toCreateTable(catalog, schema, request, serverProperties);
     DeltaLoadTableResponse response = tableRepository.createTableForDelta(
-        mapped.createTable(), mapped.uniformIcebergFields());
+        mapped.createTable(), mapped.uniformIcebergFields(), mapped.baseTableId());
     // Wire the new table into the auth hierarchy under its schema (mirrors
     // TableService.createTable). MANAGED tables reuse the staging-table UUID, whose auth row
     // was already created in createStagingTable, so re-init is unnecessary there.
@@ -250,6 +256,11 @@ public class DeltaApiService extends AuthorizedService {
    * operation} query param scopes the returned credentials: {@code READ} requires {@code SELECT}
    * (or OWNER); {@code READ_WRITE} requires {@code OWNER} or both {@code SELECT} and {@code
    * MODIFY}.
+   *
+   * <p>For a shallow clone the response carries a second, always-READ entry for the base table's
+   * location. The base entry requires the caller to also pass this endpoint's own policy against
+   * the base table with {@code operation=READ}; holding privileges on the clone alone is not
+   * enough to reach the base table's storage.
    */
   @Get("/delta/v1/catalogs/{catalog}/schemas/{schema}/tables/{table}/credentials")
   @ProducesJson
@@ -259,11 +270,31 @@ public class DeltaApiService extends AuthorizedService {
       @Param("schema") @AuthorizeResourceKey(SCHEMA) String schema,
       @Param("table") @AuthorizeResourceKey(TABLE) String table,
       @Param("operation") @AuthorizeKey DeltaCredentialOperation operation) {
-    NormalizedURL storageLocation = tableRepository.getTableStorageLocation(catalog, schema, table);
-    TemporaryCredentials credentials =
-        storageCredentialVendor.vendCredential(storageLocation, toPrivileges(operation));
-    return DeltaCredentialsMapper.toCredentialsResponse(
-        storageLocation.toString(), credentials, operation);
+    TableRepository.TableStorageLocations locations =
+        tableRepository.getTableStorageLocations(catalog, schema, table);
+    List<DeltaStorageCredential> credentials = new ArrayList<>();
+    credentials.add(vendEntry(locations.tableLocation(), operation));
+    locations.baseTable().ifPresent(base -> credentials.add(vendBaseTableEntry(base)));
+    return DeltaCredentialsMapper.toCredentialsResponse(credentials);
+  }
+
+  // Vend credentials for one storage prefix and map them to a wire entry.
+  private DeltaStorageCredential vendEntry(
+      NormalizedURL location, DeltaCredentialOperation operation) {
+    return DeltaCredentialsMapper.toStorageCredential(
+        location.toString(),
+        storageCredentialVendor.vendCredential(location, toPrivileges(operation)),
+        operation);
+  }
+
+  // Vend the always-READ entry for a shallow clone's base table
+  private DeltaStorageCredential vendBaseTableEntry(ShallowCloneUtils.BaseTableRef base) {
+    enforce(
+        AuthorizeExpressions.VEND_TABLE_CREDENTIAL,
+        Map.of(CATALOG, base.catalogId(), SCHEMA, base.schemaId(), TABLE, base.tableId()),
+        Map.of("operation", DeltaCredentialOperation.READ.getValue()),
+        "Reading a shallow clone requires read access to its base table " + base.tableId() + ".");
+    return vendEntry(base.location(), DeltaCredentialOperation.READ);
   }
 
   /**
