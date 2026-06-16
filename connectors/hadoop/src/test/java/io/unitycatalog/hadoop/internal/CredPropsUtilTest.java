@@ -840,9 +840,9 @@ class CredPropsUtilTest {
         fetchDeltaWithScopes(
             true,
             "s3",
-            "s3://clone-bucket/tables/clone",
+            "s3://table-bucket/tables/main",
             s3Creds(),
-            List.of(new ScopedCredential("s3://base-bucket/tables/base", "READ", s3Creds())));
+            List.of(new ScopedCredential("s3://scope-bucket/tables/scope", "READ", s3Creds())));
 
     assertThat(props).containsEntry(UCHadoopConfConstants.UC_CRED_SCOPE_COUNT_KEY, "1");
     assertThat(props)
@@ -850,11 +850,11 @@ class CredPropsUtilTest {
             UCHadoopConfConstants.UC_CRED_SCOPE_PREFIX
                 + 0
                 + UCHadoopConfConstants.UC_CRED_SCOPE_PREFIX_SUFFIX,
-            "s3://base-bucket/tables/base");
+            "s3://scope-bucket/tables/scope");
     String propNs = scopePropNs(0);
     assertThat(props)
         .containsEntry(
-            propNs + UCHadoopConfConstants.UC_DELTA_LOCATION_KEY, "s3://base-bucket/tables/base");
+            propNs + UCHadoopConfConstants.UC_DELTA_LOCATION_KEY, "s3://scope-bucket/tables/scope");
     assertThat(props).containsEntry(propNs + UCHadoopConfConstants.UC_TABLE_OPERATION_KEY, "READ");
     assertThat(props).containsEntry(propNs + UCHadoopConfConstants.S3A_INIT_ACCESS_KEY, "ak");
     assertThat(props.get(propNs + UCHadoopConfConstants.S3A_CREDENTIALS_PROVIDER)).isNotNull();
@@ -868,9 +868,9 @@ class CredPropsUtilTest {
         fetchDeltaWithScopes(
             false,
             "s3",
-            "s3://clone-bucket/tables/clone",
+            "s3://table-bucket/tables/main",
             s3Creds(),
-            List.of(new ScopedCredential("s3://clone-bucket/tables/base", "READ", s3Creds())));
+            List.of(new ScopedCredential("s3://table-bucket/tables/scope", "READ", s3Creds())));
     assertThat(props).containsEntry(scopePropNs(0) + "fs.s3a.access.key", "ak");
   }
 
@@ -880,9 +880,9 @@ class CredPropsUtilTest {
         fetchDeltaWithScopes(
             true,
             "gs",
-            "gs://clone-bucket/tables/clone",
+            "gs://table-bucket/tables/main",
             gcsCreds(),
-            List.of(new ScopedCredential("gs://base-bucket/tables/base", "READ", gcsCreds())));
+            List.of(new ScopedCredential("gs://scope-bucket/tables/scope", "READ", gcsCreds())));
 
     assertThat(props).containsEntry(UCHadoopConfConstants.UC_CRED_SCOPE_COUNT_KEY, "1");
     String propNs = scopePropNs(0);
@@ -897,22 +897,22 @@ class CredPropsUtilTest {
         fetchDeltaWithScopes(
             false,
             "gs",
-            "gs://clone-bucket/tables/clone",
+            "gs://table-bucket/tables/main",
             gcsCreds(),
-            List.of(new ScopedCredential("gs://base-bucket/tables/base", "READ", gcsCreds())));
+            List.of(new ScopedCredential("gs://scope-bucket/tables/scope", "READ", gcsCreds())));
     assertThat(props).containsEntry(scopePropNs(0) + "fs.gs.auth.access.token.credential", "token");
   }
 
   @Test
   void deltaScopeEmitsRenewableAbfsProvider() throws Exception {
-    String base = "abfss://container@account.dfs.core.windows.net/base";
+    String scope = "abfss://container@account.dfs.core.windows.net/scope";
     Map<String, String> props =
         fetchDeltaWithScopes(
             true,
             "abfss",
-            "abfss://container@account.dfs.core.windows.net/clone",
+            "abfss://container@account.dfs.core.windows.net/main",
             abfsCreds(),
-            List.of(new ScopedCredential(base, "READ", abfsCreds())));
+            List.of(new ScopedCredential(scope, "READ", abfsCreds())));
 
     assertThat(props).containsEntry(UCHadoopConfConstants.UC_CRED_SCOPE_COUNT_KEY, "1");
     String propNs = scopePropNs(0);
@@ -926,21 +926,21 @@ class CredPropsUtilTest {
 
   @Test
   void deltaScopeEmitsStaticAbfsToken() throws Exception {
-    String base = "abfss://container@account.dfs.core.windows.net/base";
+    String scope = "abfss://container@account.dfs.core.windows.net/scope";
     Map<String, String> props =
         fetchDeltaWithScopes(
             false,
             "abfss",
-            "abfss://container@account.dfs.core.windows.net/clone",
+            "abfss://container@account.dfs.core.windows.net/main",
             abfsCreds(),
-            List.of(new ScopedCredential(base, "READ", abfsCreds())));
+            List.of(new ScopedCredential(scope, "READ", abfsCreds())));
     assertThat(props).containsEntry(scopePropNs(0) + "fs.azure.sas.fixed.token", "sas");
   }
 
   @Test
   void deltaNoScopesLeavesPropsUntouched() throws Exception {
     Map<String, String> props =
-        fetchDeltaWithScopes(true, "s3", "s3://clone-bucket/tables/clone", s3Creds(), List.of());
+        fetchDeltaWithScopes(true, "s3", "s3://table-bucket/tables/main", s3Creds(), List.of());
     assertThat(props.keySet())
         .noneMatch(k -> k.startsWith(UCHadoopConfConstants.UC_CRED_SCOPE_PREFIX));
   }
@@ -1159,7 +1159,7 @@ class CredPropsUtilTest {
         null,
         "http://uc",
         tokenProvider(),
-        UCDeltaTableIdentifier.of("cat", "sch", "clone"),
+        UCDeltaTableIdentifier.of("cat", "sch", "tbl"),
         tableLocation,
         UCCredentialHadoopConfs.TableOperation.READ_WRITE,
         Map.of());
