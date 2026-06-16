@@ -946,6 +946,58 @@ class CredPropsUtilTest {
   }
 
   @Test
+  void deltaEmitsMultipleScopesIndexedWithCount() throws Exception {
+    Map<String, String> props =
+        fetchDeltaWithScopes(
+            false,
+            "s3",
+            "s3://table-bucket/tables/main",
+            s3Creds(),
+            List.of(
+                new ScopedCredential("s3://scope-bucket/a", "READ", s3Creds()),
+                new ScopedCredential("s3://scope-bucket/b", "READ", s3Creds())));
+
+    assertThat(props).containsEntry(UCHadoopConfConstants.UC_CRED_SCOPE_COUNT_KEY, "2");
+    assertThat(props)
+        .containsEntry(
+            UCHadoopConfConstants.UC_CRED_SCOPE_PREFIX
+                + 0
+                + UCHadoopConfConstants.UC_CRED_SCOPE_PREFIX_SUFFIX,
+            "s3://scope-bucket/a");
+    assertThat(props)
+        .containsEntry(
+            UCHadoopConfConstants.UC_CRED_SCOPE_PREFIX
+                + 1
+                + UCHadoopConfConstants.UC_CRED_SCOPE_PREFIX_SUFFIX,
+            "s3://scope-bucket/b");
+    assertThat(props).containsKey(scopePropNs(0) + "fs.s3a.access.key");
+    assertThat(props).containsKey(scopePropNs(1) + "fs.s3a.access.key");
+  }
+
+  @Test
+  void deltaEmitsScopeForDifferentCloudThanTable() throws Exception {
+    // An S3 table can carry a base scope on another cloud: the primary is emitted with S3 keys
+    // while the scope is emitted with its own cloud's keys -- emission is cloud-agnostic.
+    Map<String, String> props =
+        fetchDeltaWithScopes(
+            false,
+            "s3",
+            "s3://table-bucket/tables/main",
+            s3Creds(),
+            List.of(new ScopedCredential("gs://scope-bucket/base", "READ", gcsCreds())));
+
+    assertThat(props).containsEntry("fs.s3a.access.key", "ak");
+    assertThat(props).containsEntry(UCHadoopConfConstants.UC_CRED_SCOPE_COUNT_KEY, "1");
+    assertThat(props)
+        .containsEntry(
+            UCHadoopConfConstants.UC_CRED_SCOPE_PREFIX
+                + 0
+                + UCHadoopConfConstants.UC_CRED_SCOPE_PREFIX_SUFFIX,
+            "gs://scope-bucket/base");
+    assertThat(props).containsEntry(scopePropNs(0) + "fs.gs.auth.access.token.credential", "token");
+  }
+
+  @Test
   void fetchPathCredPropsAssemblesReqConfAndReturnsCredProps() throws Exception {
     AtomicReference<Configuration> captured = new AtomicReference<>();
     CredPropsUtil.genericCredFetcherFactory =
