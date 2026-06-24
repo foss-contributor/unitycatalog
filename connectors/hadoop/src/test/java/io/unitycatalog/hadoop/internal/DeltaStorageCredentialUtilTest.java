@@ -7,6 +7,7 @@ import io.unitycatalog.client.delta.model.DeltaCredentialOperation;
 import io.unitycatalog.client.delta.model.DeltaStorageCredential;
 import io.unitycatalog.client.delta.model.DeltaStorageCredentialConfig;
 import io.unitycatalog.client.model.TemporaryCredentials;
+import io.unitycatalog.hadoop.internal.auth.ScopedCredential;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
@@ -168,7 +169,64 @@ class DeltaStorageCredentialUtilTest {
         .hasMessageContaining("missing S3 access key");
   }
 
+  @Test
+  void toAdditionalScopedCredentialsReturnsNonPrimaryCloudCredentials() {
+    DeltaStorageCredential primary =
+        s3CredWithConfig("s3://bucket/main", DeltaCredentialOperation.READ_WRITE);
+    DeltaStorageCredential base =
+        new DeltaStorageCredential()
+            .prefix("gs://other/base")
+            .operation(DeltaCredentialOperation.READ)
+            .config(new DeltaStorageCredentialConfig().gcsOauthToken("gcs-oauth-token"));
+
+    List<ScopedCredential> scopes =
+        DeltaStorageCredentialUtil.toAdditionalScopedCredentials(
+            primary, Arrays.asList(primary, base));
+
+    assertThat(scopes).hasSize(1);
+    ScopedCredential scope = scopes.get(0);
+    assertThat(scope.prefix()).isEqualTo("gs://other/base");
+    assertThat(scope.operation()).isEqualTo("READ");
+    assertThat(scope.credentials().getGcpOauthToken().getOauthToken()).isEqualTo("gcs-oauth-token");
+  }
+
+  @Test
+  void toAdditionalScopedCredentialsSkipsNullPrefixlessNonCloudAndDefaultsOperation() {
+    DeltaStorageCredential primary =
+        s3CredWithConfig("s3://bucket/main", DeltaCredentialOperation.READ_WRITE);
+    DeltaStorageCredential noOperation =
+        new DeltaStorageCredential()
+            .prefix("s3://other/base")
+            .config(
+                new DeltaStorageCredentialConfig()
+                    .s3AccessKeyId("ak")
+                    .s3SecretAccessKey("sk")
+                    .s3SessionToken("st"));
+
+    List<ScopedCredential> scopes =
+        DeltaStorageCredentialUtil.toAdditionalScopedCredentials(
+            primary,
+            Arrays.asList(
+                primary, null, new DeltaStorageCredential(), credAt("file:///tmp/x"), noOperation));
+
+    assertThat(scopes).hasSize(1);
+    assertThat(scopes.get(0).prefix()).isEqualTo("s3://other/base");
+    assertThat(scopes.get(0).operation()).isEqualTo("READ");
+  }
+
   private static DeltaStorageCredential credAt(String prefix) {
     return new DeltaStorageCredential().prefix(prefix);
+  }
+
+  private static DeltaStorageCredential s3CredWithConfig(
+      String prefix, DeltaCredentialOperation operation) {
+    return new DeltaStorageCredential()
+        .prefix(prefix)
+        .operation(operation)
+        .config(
+            new DeltaStorageCredentialConfig()
+                .s3AccessKeyId("ak")
+                .s3SecretAccessKey("sk")
+                .s3SessionToken("st"));
   }
 }
