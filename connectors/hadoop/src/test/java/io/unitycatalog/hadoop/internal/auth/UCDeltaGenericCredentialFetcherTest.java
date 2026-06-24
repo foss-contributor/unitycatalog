@@ -113,6 +113,86 @@ class UCDeltaGenericCredentialFetcherTest {
   }
 
   @Test
+  void createCredentialSplitsMultiEntryResponseIntoPrimaryAndScopes() throws Exception {
+    Configuration conf = new Configuration(false);
+    conf.set(UCHadoopConfConstants.UC_DELTA_CATALOG_KEY, "main");
+    conf.set(UCHadoopConfConstants.UC_DELTA_SCHEMA_KEY, "default");
+    conf.set(UCHadoopConfConstants.UC_DELTA_TABLE_NAME_KEY, "events");
+    conf.set(UCHadoopConfConstants.UC_DELTA_LOCATION_KEY, "s3://bucket/events");
+    conf.set(UCHadoopConfConstants.UC_TABLE_OPERATION_KEY, "READ_WRITE");
+
+    DeltaStorageCredential primary =
+        new DeltaStorageCredential()
+            .prefix("s3://bucket/events")
+            .operation(DeltaCredentialOperation.READ_WRITE)
+            .config(
+                new DeltaStorageCredentialConfig()
+                    .s3AccessKeyId("primary-ak")
+                    .s3SecretAccessKey("primary-sk")
+                    .s3SessionToken("primary-st"));
+    DeltaStorageCredential base =
+        new DeltaStorageCredential()
+            .prefix("s3://other/base")
+            .operation(DeltaCredentialOperation.READ)
+            .config(
+                new DeltaStorageCredentialConfig()
+                    .s3AccessKeyId("base-ak")
+                    .s3SecretAccessKey("base-sk")
+                    .s3SessionToken("base-st"));
+    DeltaCredentialsResponse response =
+        new DeltaCredentialsResponse()
+            .addStorageCredentialsItem(primary)
+            .addStorageCredentialsItem(base);
+
+    DeltaTemporaryCredentialsApi api = mock(DeltaTemporaryCredentialsApi.class);
+    when(api.getTableCredentials(DeltaCredentialOperation.READ_WRITE, "main", "default", "events"))
+        .thenReturn(response);
+
+    GenericCredentialFetcher fetcher = GenericCredentialFetcher.forUcDelta(conf, api);
+    GenericCredential cred = fetcher.createCredential();
+
+    assertThat(cred.temporaryCredentials().getAwsTempCredentials().getAccessKeyId())
+        .isEqualTo("primary-ak");
+    assertThat(fetcher.additionalScopedCredentials()).hasSize(1);
+    ScopedCredential scope = fetcher.additionalScopedCredentials().get(0);
+    assertThat(scope.prefix()).isEqualTo("s3://other/base");
+    assertThat(scope.operation()).isEqualTo("READ");
+    assertThat(scope.credentials().getAwsTempCredentials().getAccessKeyId()).isEqualTo("base-ak");
+  }
+
+  @Test
+  void additionalScopedCredentialsEmptyByDefaultAndWhenResponseHasOnlyPrimary() throws Exception {
+    Configuration conf = new Configuration(false);
+    conf.set(UCHadoopConfConstants.UC_DELTA_CATALOG_KEY, "main");
+    conf.set(UCHadoopConfConstants.UC_DELTA_SCHEMA_KEY, "default");
+    conf.set(UCHadoopConfConstants.UC_DELTA_TABLE_NAME_KEY, "events");
+    conf.set(UCHadoopConfConstants.UC_DELTA_LOCATION_KEY, "s3://bucket/events");
+    conf.set(UCHadoopConfConstants.UC_TABLE_OPERATION_KEY, "READ_WRITE");
+
+    DeltaStorageCredential primary =
+        new DeltaStorageCredential()
+            .prefix("s3://bucket/events")
+            .operation(DeltaCredentialOperation.READ_WRITE)
+            .config(
+                new DeltaStorageCredentialConfig()
+                    .s3AccessKeyId("ak")
+                    .s3SecretAccessKey("sk")
+                    .s3SessionToken("st"));
+    DeltaCredentialsResponse response =
+        new DeltaCredentialsResponse().addStorageCredentialsItem(primary);
+
+    DeltaTemporaryCredentialsApi api = mock(DeltaTemporaryCredentialsApi.class);
+    when(api.getTableCredentials(DeltaCredentialOperation.READ_WRITE, "main", "default", "events"))
+        .thenReturn(response);
+
+    GenericCredentialFetcher fetcher = GenericCredentialFetcher.forUcDelta(conf, api);
+    assertThat(fetcher.additionalScopedCredentials()).isEmpty();
+
+    fetcher.createCredential();
+    assertThat(fetcher.additionalScopedCredentials()).isEmpty();
+  }
+
+  @Test
   void factoryThrowsWhenConfMissingCatalog() {
     Configuration conf = new Configuration(false);
     conf.set(UCHadoopConfConstants.UC_DELTA_SCHEMA_KEY, "s");
