@@ -4,9 +4,12 @@ import io.unitycatalog.client.ApiException;
 import io.unitycatalog.client.delta.api.DeltaTemporaryCredentialsApi;
 import io.unitycatalog.client.delta.model.DeltaCredentialOperation;
 import io.unitycatalog.client.delta.model.DeltaCredentialsResponse;
+import io.unitycatalog.client.delta.model.DeltaStorageCredential;
 import io.unitycatalog.client.internal.Preconditions;
 import io.unitycatalog.hadoop.internal.DeltaStorageCredentialUtil;
 import io.unitycatalog.hadoop.internal.UCHadoopConfConstants;
+import java.util.Collections;
+import java.util.List;
 import org.apache.hadoop.conf.Configuration;
 
 /** Adapts the UC Delta temporary credentials SDK API for Hadoop token providers. */
@@ -17,6 +20,7 @@ final class UCDeltaGenericCredentialFetcher implements GenericCredentialFetcher 
   private final String schema;
   private final String tableName;
   private final String location;
+  private List<ScopedCredential> additionalScopedCredentials = Collections.emptyList();
 
   UCDeltaGenericCredentialFetcher(Configuration conf, DeltaTemporaryCredentialsApi api) {
     Preconditions.checkNotNull(api, "api is required");
@@ -44,10 +48,17 @@ final class UCDeltaGenericCredentialFetcher implements GenericCredentialFetcher 
         catalog,
         schema,
         tableName);
-    return new GenericCredential(
-        DeltaStorageCredentialUtil.toTemporaryCredentials(
-            DeltaStorageCredentialUtil.selectForLocation(
-                location, response.getStorageCredentials())));
+    DeltaStorageCredential primary =
+        DeltaStorageCredentialUtil.selectForLocation(location, response.getStorageCredentials());
+    additionalScopedCredentials =
+        DeltaStorageCredentialUtil.toAdditionalScopedCredentials(
+            primary, response.getStorageCredentials());
+    return new GenericCredential(DeltaStorageCredentialUtil.toTemporaryCredentials(primary));
+  }
+
+  @Override
+  public List<ScopedCredential> additionalScopedCredentials() {
+    return additionalScopedCredentials;
   }
 
   private static String require(Configuration conf, String key) {

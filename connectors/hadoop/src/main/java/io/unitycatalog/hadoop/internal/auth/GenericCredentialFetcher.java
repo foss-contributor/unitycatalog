@@ -9,6 +9,8 @@ import io.unitycatalog.client.internal.ApiClientUtils;
 import io.unitycatalog.client.internal.Preconditions;
 import io.unitycatalog.hadoop.internal.UCHadoopConfConstants;
 import java.net.URI;
+import java.util.Collections;
+import java.util.List;
 import org.apache.hadoop.conf.Configuration;
 
 /**
@@ -20,6 +22,15 @@ import org.apache.hadoop.conf.Configuration;
  */
 public interface GenericCredentialFetcher {
   GenericCredential createCredential() throws ApiException;
+
+  /**
+   * Credentials vended alongside the primary one for other location prefixes — e.g. the READ
+   * credential for a shallow clone's base table location. Populated by {@link #createCredential()};
+   * empty unless the backing API returned multiple scoped credentials.
+   */
+  default List<ScopedCredential> additionalScopedCredentials() {
+    return Collections.emptyList();
+  }
 
   /** Creates a fetcher backed by the standard UC temporary credentials API. */
   static GenericCredentialFetcher forUc(Configuration conf, TemporaryCredentialsApi api) {
