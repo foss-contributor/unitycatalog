@@ -20,29 +20,13 @@ class UCDeltaGenericCredentialFetcherTest {
 
   @Test
   void createCredentialCallsDeltaApiWithConfFieldsAndReturnsCredential() throws Exception {
-    Configuration conf = new Configuration(false);
-    conf.set(UCHadoopConfConstants.UC_DELTA_CATALOG_KEY, "main");
-    conf.set(UCHadoopConfConstants.UC_DELTA_SCHEMA_KEY, "default");
-    conf.set(UCHadoopConfConstants.UC_DELTA_TABLE_NAME_KEY, "events");
-    conf.set(UCHadoopConfConstants.UC_DELTA_LOCATION_KEY, "s3://bucket/events");
-    conf.set(UCHadoopConfConstants.UC_TABLE_OPERATION_KEY, "READ_WRITE");
-
+    Configuration conf = deltaTableConf();
     DeltaStorageCredential sc =
-        new DeltaStorageCredential()
-            .prefix("s3://bucket/events")
-            .operation(DeltaCredentialOperation.READ_WRITE)
-            .expirationTimeMs(789L)
-            .config(
-                new DeltaStorageCredentialConfig()
-                    .s3AccessKeyId("ak")
-                    .s3SecretAccessKey("sk")
-                    .s3SessionToken("st"));
+        s3Cred("s3://bucket/events", DeltaCredentialOperation.READ_WRITE, "ak")
+            .expirationTimeMs(789L);
     DeltaCredentialsResponse response =
         new DeltaCredentialsResponse().addStorageCredentialsItem(sc);
-
-    DeltaTemporaryCredentialsApi api = mock(DeltaTemporaryCredentialsApi.class);
-    when(api.getTableCredentials(DeltaCredentialOperation.READ_WRITE, "main", "default", "events"))
-        .thenReturn(response);
+    DeltaTemporaryCredentialsApi api = mockDeltaApi(response);
 
     GenericCredential cred = GenericCredentialFetcher.forUcDelta(conf, api).createCredential();
 
@@ -58,28 +42,12 @@ class UCDeltaGenericCredentialFetcherTest {
 
   @Test
   void createCredentialUsesFieldsParsedAtConstruction() throws Exception {
-    Configuration conf = new Configuration(false);
-    conf.set(UCHadoopConfConstants.UC_DELTA_CATALOG_KEY, "main");
-    conf.set(UCHadoopConfConstants.UC_DELTA_SCHEMA_KEY, "default");
-    conf.set(UCHadoopConfConstants.UC_DELTA_TABLE_NAME_KEY, "events");
-    conf.set(UCHadoopConfConstants.UC_DELTA_LOCATION_KEY, "s3://bucket/events");
-    conf.set(UCHadoopConfConstants.UC_TABLE_OPERATION_KEY, "READ_WRITE");
-
+    Configuration conf = deltaTableConf();
     DeltaStorageCredential sc =
-        new DeltaStorageCredential()
-            .prefix("s3://bucket/events")
-            .operation(DeltaCredentialOperation.READ_WRITE)
-            .config(
-                new DeltaStorageCredentialConfig()
-                    .s3AccessKeyId("ak")
-                    .s3SecretAccessKey("sk")
-                    .s3SessionToken("st"));
+        s3Cred("s3://bucket/events", DeltaCredentialOperation.READ_WRITE, "ak");
     DeltaCredentialsResponse response =
         new DeltaCredentialsResponse().addStorageCredentialsItem(sc);
-
-    DeltaTemporaryCredentialsApi api = mock(DeltaTemporaryCredentialsApi.class);
-    when(api.getTableCredentials(DeltaCredentialOperation.READ_WRITE, "main", "default", "events"))
-        .thenReturn(response);
+    DeltaTemporaryCredentialsApi api = mockDeltaApi(response);
     GenericCredentialFetcher credentialFetcher = GenericCredentialFetcher.forUcDelta(conf, api);
 
     conf.set(UCHadoopConfConstants.UC_DELTA_CATALOG_KEY, "mutated-catalog");
@@ -96,16 +64,8 @@ class UCDeltaGenericCredentialFetcherTest {
 
   @Test
   void createCredentialRejectsMissingCredentialsResponse() throws Exception {
-    Configuration conf = new Configuration(false);
-    conf.set(UCHadoopConfConstants.UC_DELTA_CATALOG_KEY, "main");
-    conf.set(UCHadoopConfConstants.UC_DELTA_SCHEMA_KEY, "default");
-    conf.set(UCHadoopConfConstants.UC_DELTA_TABLE_NAME_KEY, "events");
-    conf.set(UCHadoopConfConstants.UC_DELTA_LOCATION_KEY, "s3://bucket/events");
-    conf.set(UCHadoopConfConstants.UC_TABLE_OPERATION_KEY, "READ_WRITE");
-
-    DeltaTemporaryCredentialsApi api = mock(DeltaTemporaryCredentialsApi.class);
-    when(api.getTableCredentials(DeltaCredentialOperation.READ_WRITE, "main", "default", "events"))
-        .thenReturn(null);
+    Configuration conf = deltaTableConf();
+    DeltaTemporaryCredentialsApi api = mockDeltaApi(null);
 
     assertThatThrownBy(() -> GenericCredentialFetcher.forUcDelta(conf, api).createCredential())
         .isInstanceOf(IllegalArgumentException.class)
@@ -138,5 +98,78 @@ class UCDeltaGenericCredentialFetcherTest {
     DeltaTemporaryCredentialsApi api = mock(DeltaTemporaryCredentialsApi.class);
     assertThatThrownBy(() -> GenericCredentialFetcher.forUcDelta(conf, api))
         .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void multiCredentialResponsePopulatesScopesPrimaryReturnedAndIsolated() throws Exception {
+    Configuration conf = deltaTableConf();
+    DeltaStorageCredential primary =
+        s3Cred("s3://bucket/events", DeltaCredentialOperation.READ_WRITE, "ak-primary");
+    DeltaStorageCredential other =
+        s3Cred("s3://bucket/other", DeltaCredentialOperation.READ, "ak-other");
+    DeltaCredentialsResponse response =
+        new DeltaCredentialsResponse()
+            .addStorageCredentialsItem(primary)
+            .addStorageCredentialsItem(other);
+    DeltaTemporaryCredentialsApi api = mockDeltaApi(response);
+
+    GenericCredentialFetcher fetcher = GenericCredentialFetcher.forUcDelta(conf, api);
+    GenericCredential cred = fetcher.createCredential();
+
+    // The credential for the table's own location is returned as primary.
+    assertThat(cred.temporaryCredentials().getAwsTempCredentials().getAccessKeyId())
+        .isEqualTo("ak-primary");
+    // Other vended credential is exposed as an isolated scope, not duplicated.
+    assertThat(fetcher.additionalScopedCredentials()).hasSize(1);
+    ScopedCredential scope = fetcher.additionalScopedCredentials().get(0);
+    assertThat(scope.prefix()).isEqualTo("s3://bucket/other");
+    assertThat(scope.credentials().getAwsTempCredentials().getAccessKeyId()).isEqualTo("ak-other");
+  }
+
+  @Test
+  void additionalScopedCredentialsEmptyBeforeCreateCredentialAndAfterSingleCredentialResponse()
+      throws Exception {
+    Configuration conf = deltaTableConf();
+    DeltaStorageCredential only =
+        s3Cred("s3://bucket/events", DeltaCredentialOperation.READ_WRITE, "ak");
+    DeltaCredentialsResponse response =
+        new DeltaCredentialsResponse().addStorageCredentialsItem(only);
+    DeltaTemporaryCredentialsApi api = mockDeltaApi(response);
+
+    GenericCredentialFetcher fetcher = GenericCredentialFetcher.forUcDelta(conf, api);
+    // Empty (not null) before any fetch, and still empty after a single-credential response.
+    assertThat(fetcher.additionalScopedCredentials()).isNotNull().isEmpty();
+    fetcher.createCredential();
+    assertThat(fetcher.additionalScopedCredentials()).isEmpty();
+  }
+
+  private static Configuration deltaTableConf() {
+    Configuration conf = new Configuration(false);
+    conf.set(UCHadoopConfConstants.UC_DELTA_CATALOG_KEY, "main");
+    conf.set(UCHadoopConfConstants.UC_DELTA_SCHEMA_KEY, "default");
+    conf.set(UCHadoopConfConstants.UC_DELTA_TABLE_NAME_KEY, "events");
+    conf.set(UCHadoopConfConstants.UC_DELTA_LOCATION_KEY, "s3://bucket/events");
+    conf.set(UCHadoopConfConstants.UC_TABLE_OPERATION_KEY, "READ_WRITE");
+    return conf;
+  }
+
+  private static DeltaTemporaryCredentialsApi mockDeltaApi(DeltaCredentialsResponse response)
+      throws Exception {
+    DeltaTemporaryCredentialsApi api = mock(DeltaTemporaryCredentialsApi.class);
+    when(api.getTableCredentials(DeltaCredentialOperation.READ_WRITE, "main", "default", "events"))
+        .thenReturn(response);
+    return api;
+  }
+
+  private static DeltaStorageCredential s3Cred(
+      String prefix, DeltaCredentialOperation operation, String accessKeyId) {
+    return new DeltaStorageCredential()
+        .prefix(prefix)
+        .operation(operation)
+        .config(
+            new DeltaStorageCredentialConfig()
+                .s3AccessKeyId(accessKeyId)
+                .s3SecretAccessKey("sk")
+                .s3SessionToken("st"));
   }
 }
