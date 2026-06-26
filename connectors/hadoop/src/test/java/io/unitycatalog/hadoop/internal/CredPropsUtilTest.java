@@ -3,6 +3,8 @@ package io.unitycatalog.hadoop.internal;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import io.unitycatalog.client.auth.TokenProvider;
@@ -16,11 +18,15 @@ import io.unitycatalog.client.model.TemporaryCredentials;
 import io.unitycatalog.hadoop.UCCredentialHadoopConfs;
 import io.unitycatalog.hadoop.internal.auth.GenericCredential;
 import io.unitycatalog.hadoop.internal.auth.GenericCredentialFetcher;
+import io.unitycatalog.hadoop.internal.auth.ScopedCredential;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 import org.apache.hadoop.conf.Configuration;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 /**
  * Verifies that {@link io.unitycatalog.hadoop.internal.CredPropsUtil} saves the original {@code
@@ -1008,6 +1014,78 @@ class CredPropsUtilTest {
     assertThat(deltaProps).containsEntry("fs.gs.create.items.conflict.check.enable", "false");
   }
 
+  @Test
+  void fetchDeltaTableCredPropsEmptyScopesReturnsPrimaryPropsVerbatimSingleFetch()
+      throws Exception {
+    GenericCredentialFetcher fetcher = fetcherWithScopes(s3Creds(), List.of());
+
+    Map<String, String> props = fetchScoped(fetcher, true, false, "s3", "s3://own/tbl");
+
+    // The table's own credentials come through unchanged
+    assertThat(props).containsEntry(UCHadoopConfConstants.S3A_INIT_ACCESS_KEY, "ak");
+    // Empty scope list adds neither a count nor any per-scope keys (backward compat).
+    assertThat(props).doesNotContainKey(UCHadoopConfConstants.UC_CRED_SCOPE_COUNT_KEY);
+    assertThat(props.keySet())
+        .noneMatch(k -> k.startsWith(UCHadoopConfConstants.UC_CRED_SCOPE_PREFIX));
+    // The credential is fetched once and the scope list is read once (early return, no merge).
+    verify(fetcher, times(1)).createCredential();
+    verify(fetcher).additionalScopedCredentials();
+  }
+
+  @ParameterizedTest(name = "credScopedFsEnabled={0}")
+  @ValueSource(booleans = {true, false})
+  void fetchDeltaTableCredPropsEmitsEachScopeNamespacedAndIsolatedPerCloud(
+      boolean credScopedFsEnabled) throws Exception {
+    String otherS3 = "s3://other/tbl";
+    String gsPrefix = "gs://gcsbucket/data";
+    String abfssPrefix = "abfss://container@account.dfs.core.windows.net/data";
+    GenericCredentialFetcher fetcher =
+        fetcherWithScopes(
+            s3Creds(),
+            List.of(
+                new ScopedCredential(otherS3, "READ", s3Creds("other-ak")),
+                new ScopedCredential(gsPrefix, "READ", gcsCreds()),
+                new ScopedCredential(abfssPrefix, "READ", abfsCreds())));
+
+    Map<String, String> props =
+        fetchScoped(fetcher, /* renew= */ true, credScopedFsEnabled, "s3", "s3://own/tbl");
+
+    // Count and no phantom index, identical under both flag values (emission ignores the flag).
+    assertThat(props).containsEntry(UCHadoopConfConstants.UC_CRED_SCOPE_COUNT_KEY, "3");
+    assertThat(props).doesNotContainKey(scopePrefixKey(3));
+
+    // Index 0 shares the table's cloud: namespaced under its own location/operation, table's own
+    // credential and location left intact at the top level (so the scope renews against itself).
+    assertThat(props).containsEntry(scopePrefixKey(0), otherS3);
+    assertThat(props)
+        .containsEntry(scopePropKey(0, UCHadoopConfConstants.S3A_INIT_ACCESS_KEY), "other-ak");
+    assertThat(props).containsEntry(UCHadoopConfConstants.S3A_INIT_ACCESS_KEY, "ak");
+    assertThat(props)
+        .containsEntry(scopePropKey(0, UCHadoopConfConstants.UC_TABLE_OPERATION_KEY), "READ");
+    assertThat(props).containsEntry(UCHadoopConfConstants.UC_TABLE_OPERATION_KEY, "READ_WRITE");
+    assertThat(props)
+        .containsEntry(scopePropKey(0, UCHadoopConfConstants.UC_DELTA_LOCATION_KEY), otherS3);
+    assertThat(props).containsEntry(UCHadoopConfConstants.UC_DELTA_LOCATION_KEY, "s3://own/tbl");
+
+    // Indices 1-2 are foreign clouds: scheme keys, no top-level leak, no cross-index bleed.
+    assertThat(props).containsEntry(scopePrefixKey(1), gsPrefix);
+    assertThat(props)
+        .containsEntry(scopePropKey(1, UCHadoopConfConstants.GCS_INIT_OAUTH_TOKEN), "token");
+    assertThat(props).containsEntry(scopePrefixKey(2), abfssPrefix);
+    assertThat(props)
+        .containsEntry(scopePropKey(2, UCHadoopConfConstants.AZURE_INIT_SAS_TOKEN), "sas");
+    assertThat(props).doesNotContainKey(UCHadoopConfConstants.GCS_INIT_OAUTH_TOKEN);
+    assertThat(props).doesNotContainKey(UCHadoopConfConstants.AZURE_INIT_SAS_TOKEN);
+    assertThat(props)
+        .doesNotContainKey(scopePropKey(1, UCHadoopConfConstants.AZURE_INIT_SAS_TOKEN));
+    assertThat(props)
+        .doesNotContainKey(scopePropKey(2, UCHadoopConfConstants.GCS_INIT_OAUTH_TOKEN));
+
+    // Single fetch; the returned map is immutable.
+    verify(fetcher, times(1)).createCredential();
+    assertThatThrownBy(() -> props.put("k", "v")).isInstanceOf(UnsupportedOperationException.class);
+  }
+
   private static GenericCredentialFetcher mockGenericCredentialFetcher(TemporaryCredentials creds) {
     GenericCredentialFetcher api = mock(GenericCredentialFetcher.class);
     try {
@@ -1018,14 +1096,60 @@ class CredPropsUtilTest {
     return api;
   }
 
+  private static GenericCredentialFetcher fetcherWithScopes(
+      TemporaryCredentials primary, List<ScopedCredential> scopes) {
+    GenericCredentialFetcher fetcher = mockGenericCredentialFetcher(primary);
+    when(fetcher.additionalScopedCredentials()).thenReturn(scopes);
+    return fetcher;
+  }
+
+  private static Map<String, String> fetchScoped(
+      GenericCredentialFetcher fetcher,
+      boolean renew,
+      boolean credScopedFsEnabled,
+      String scheme,
+      String location)
+      throws Exception {
+    CredPropsUtil.genericCredFetcherFactory = (apiClient, conf) -> fetcher;
+    return CredPropsUtil.fetchDeltaTableCredProps(
+        renew,
+        credScopedFsEnabled,
+        new Configuration(false),
+        scheme,
+        null,
+        "http://uc",
+        tokenProvider(),
+        UCDeltaTableIdentifier.of("cat", "sch", "tbl"),
+        location,
+        UCCredentialHadoopConfs.TableOperation.READ_WRITE,
+        Map.of());
+  }
+
+  private static String scopePrefixKey(int index) {
+    return UCHadoopConfConstants.UC_CRED_SCOPE_PREFIX
+        + index
+        + UCHadoopConfConstants.UC_CRED_SCOPE_PREFIX_SUFFIX;
+  }
+
+  private static String scopePropKey(int index, String key) {
+    return UCHadoopConfConstants.UC_CRED_SCOPE_PREFIX
+        + index
+        + UCHadoopConfConstants.UC_CRED_SCOPE_PROP_SUFFIX
+        + key;
+  }
+
   private static TokenProvider tokenProvider() {
     return TokenProvider.create(Map.of("type", "static", "token", "tok"));
   }
 
   private static TemporaryCredentials s3Creds() {
+    return s3Creds("ak");
+  }
+
+  private static TemporaryCredentials s3Creds(String accessKeyId) {
     return new TemporaryCredentials()
         .awsTempCredentials(
-            new AwsCredentials().accessKeyId("ak").secretAccessKey("sk").sessionToken("st"));
+            new AwsCredentials().accessKeyId(accessKeyId).secretAccessKey("sk").sessionToken("st"));
   }
 
   private static TemporaryCredentials gcsCreds() {
