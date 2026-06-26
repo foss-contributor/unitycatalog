@@ -6,6 +6,8 @@ import static org.mockito.Mockito.verify;
 
 import io.unitycatalog.hadoop.internal.UCHadoopConfConstants;
 import java.net.URI;
+import java.util.HashMap;
+import java.util.Map;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.junit.jupiter.api.AfterEach;
@@ -75,5 +77,27 @@ class CredScopedFileSystemCacheTest {
     CredScopedFileSystem.clearCacheForTesting();
 
     verify(mockFs).close();
+  }
+
+  @Test
+  void initializeThreadsEffectiveConfIntoKeyAndDelegateScopedDistinctUncoveredBaselineCachedReuse()
+      throws Exception {
+    Configuration conf = tableConf("tid-1", "WRITE");
+    // A scope overlays op=READ for file:///scoped paths; operation is part of the cache key, so a
+    // covered path resolves to a different delegate than the table's own (op=WRITE) path.
+    Map<String, String> scope = new HashMap<>();
+    CredentialScopes.encode(
+        scope, 0, "file:///scoped", Map.of(UCHadoopConfConstants.UC_TABLE_OPERATION_KEY, "READ"));
+    scope.forEach(conf::set);
+    conf.set(UCHadoopConfConstants.UC_CRED_SCOPE_COUNT_KEY, "1");
+
+    CredScopedFileSystem covered1 = init(new URI("file:///scoped/data/part-0"), conf);
+    CredScopedFileSystem covered2 = init(new URI("file:///scoped/data/part-1"), conf);
+    CredScopedFileSystem ownPath = init(new URI("file:///own/x"), conf);
+
+    assertThat(covered1.getDelegate()).isNotSameAs(ownPath.getDelegate());
+    assertThat(covered1.getDelegate()).isSameAs(covered2.getDelegate());
+    // The caller's conf is overlaid onto a copy, not mutated.
+    assertThat(conf.get(UCHadoopConfConstants.UC_TABLE_OPERATION_KEY)).isEqualTo("WRITE");
   }
 }
