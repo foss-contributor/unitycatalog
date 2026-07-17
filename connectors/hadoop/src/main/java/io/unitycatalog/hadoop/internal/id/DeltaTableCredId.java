@@ -48,10 +48,6 @@ public class DeltaTableCredId implements CredId {
     return tableOperation;
   }
 
-  public String location() {
-    return location;
-  }
-
   @Override
   public Map<String, String> props() {
     return Map.of(
