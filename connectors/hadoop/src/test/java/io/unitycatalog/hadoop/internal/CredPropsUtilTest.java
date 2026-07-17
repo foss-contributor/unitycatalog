@@ -15,8 +15,11 @@ import io.unitycatalog.client.model.TemporaryCredentials;
 import io.unitycatalog.hadoop.UCCredentialHadoopConfs;
 import io.unitycatalog.hadoop.internal.auth.GenericCredential;
 import io.unitycatalog.hadoop.internal.auth.GenericCredentialFetcher;
+import io.unitycatalog.hadoop.internal.auth.GenericStorageCredential;
 import io.unitycatalog.hadoop.internal.id.CredId;
 import java.time.Duration;
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -244,6 +247,120 @@ class CredPropsUtilTest {
         .containsEntry(UCHadoopConfConstants.S3A_INIT_SECRET_KEY, "sk")
         .containsEntry(UCHadoopConfConstants.S3A_INIT_SESSION_TOKEN, "st")
         .doesNotContainKey(UCHadoopConfConstants.UC_TABLE_ID_KEY);
+  }
+
+  @Test
+  void multiCredDeltaTableWritesIndexedKeyspaceAndOmitsTopLevelValueKeys() throws Exception {
+    CredPropsUtil.genericCredFetcherFactory =
+        (apiClient, credId) ->
+            mockMultiCredentialFetcher(
+                s3ScopedCred("s3://bucket/tbl", "0"), s3ScopedCred("s3://bucket/tbl/nested", "1"));
+
+    Map<String, String> props =
+        CredPropsUtil.createDeltaTableCredProps(
+            true,
+            true,
+            new Configuration(false),
+            "s3",
+            null,
+            "http://uc",
+            tokenProvider(),
+            UCDeltaTableIdentifier.of("cat", "sch", "tbl"),
+            "s3://bucket/tbl",
+            UCCredentialHadoopConfs.TableOperation.READ_WRITE,
+            Map.of());
+
+    // Count plus shared filesystem wiring keys are present.
+    assertThat(props)
+        .containsEntry(UCHadoopConfConstants.UC_SCOPED_CRED_COUNT_KEY, "2")
+        .containsEntry(UCHadoopConfConstants.UC_URI_KEY, "http://uc")
+        .containsEntry("fs.s3a.impl", "io.unitycatalog.hadoop.internal.fs.CredScopedFileSystem");
+
+    // No top-level credential value keys and no top-level selection-location key are written for
+    // the multi-cred path (those live per-credential under each namespace).
+    assertThat(props)
+        .doesNotContainKey(UCHadoopConfConstants.S3A_INIT_ACCESS_KEY)
+        .doesNotContainKey(UCHadoopConfConstants.S3A_INIT_SECRET_KEY)
+        .doesNotContainKey(UCHadoopConfConstants.S3A_INIT_SESSION_TOKEN)
+        .doesNotContainKey(UCHadoopConfConstants.UC_CREDENTIAL_LOCATION_KEY);
+
+    // The request's CredId scope is written once at the top level (scope identity, not material).
+    assertThat(props)
+        .containsEntry(UCHadoopConfConstants.UC_DELTA_CATALOG_KEY, "cat")
+        .containsEntry(UCHadoopConfConstants.UC_DELTA_SCHEMA_KEY, "sch")
+        .containsEntry(UCHadoopConfConstants.UC_DELTA_TABLE_NAME_KEY, "tbl")
+        .containsEntry(UCHadoopConfConstants.UC_DELTA_LOCATION_KEY, "s3://bucket/tbl")
+        .containsEntry(UCHadoopConfConstants.UC_DELTA_CREDENTIALS_API_ENABLED_KEY, "true");
+
+    // Each credential is written under its own namespace: its location + cloud value keys.
+    String ns0 = UCHadoopConfConstants.UC_SCOPED_CRED_PREFIX + "0.";
+    String ns1 = UCHadoopConfConstants.UC_SCOPED_CRED_PREFIX + "1.";
+    assertThat(props)
+        .containsEntry(ns0 + UCHadoopConfConstants.UC_CREDENTIAL_LOCATION_KEY, "s3://bucket/tbl")
+        .containsEntry(ns0 + UCHadoopConfConstants.S3A_INIT_ACCESS_KEY, "ak0")
+        .containsEntry(ns0 + UCHadoopConfConstants.S3A_INIT_SECRET_KEY, "sk0")
+        .containsEntry(ns0 + UCHadoopConfConstants.S3A_INIT_SESSION_TOKEN, "st0")
+        .containsEntry(ns0 + UCHadoopConfConstants.S3A_INIT_CRED_EXPIRED_TIME, "111")
+        .containsEntry(
+            ns1 + UCHadoopConfConstants.UC_CREDENTIAL_LOCATION_KEY, "s3://bucket/tbl/nested")
+        .containsEntry(ns1 + UCHadoopConfConstants.S3A_INIT_ACCESS_KEY, "ak1");
+  }
+
+  @Test
+  void singleCredDeltaTableWritesSingleEntryKeyspace() throws Exception {
+    CredPropsUtil.genericCredFetcherFactory =
+        (apiClient, credId) -> mockMultiCredentialFetcher(s3ScopedCred("s3://bucket/tbl", "0"));
+
+    Map<String, String> props =
+        CredPropsUtil.createDeltaTableCredProps(
+            true,
+            true,
+            new Configuration(false),
+            "s3",
+            null,
+            "http://uc",
+            tokenProvider(),
+            UCDeltaTableIdentifier.of("cat", "sch", "tbl"),
+            "s3://bucket/tbl",
+            UCCredentialHadoopConfs.TableOperation.READ_WRITE,
+            Map.of());
+
+    // With the credential-scoped filesystem enabled, a single vended credential is serialized into
+    // the keyspace too (count = 1): its location and value keys live under namespace 0, while the
+    // top level holds only the shared scope + wiring (no top-level value or location key).
+    String ns0 = UCHadoopConfConstants.UC_SCOPED_CRED_PREFIX + "0.";
+    assertThat(props)
+        .containsEntry(UCHadoopConfConstants.UC_SCOPED_CRED_COUNT_KEY, "1")
+        .containsEntry(UCHadoopConfConstants.UC_DELTA_LOCATION_KEY, "s3://bucket/tbl")
+        .containsEntry(ns0 + UCHadoopConfConstants.UC_CREDENTIAL_LOCATION_KEY, "s3://bucket/tbl")
+        .containsEntry(ns0 + UCHadoopConfConstants.S3A_INIT_ACCESS_KEY, "ak0")
+        .doesNotContainKey(UCHadoopConfConstants.UC_CREDENTIAL_LOCATION_KEY)
+        .doesNotContainKey(UCHadoopConfConstants.S3A_INIT_ACCESS_KEY);
+  }
+
+  @Test
+  void multiCredRejectedWhenCredScopedFsDisabled() {
+    CredPropsUtil.genericCredFetcherFactory =
+        (apiClient, credId) ->
+            mockMultiCredentialFetcher(
+                s3ScopedCred("s3://bucket/tbl", "0"), s3ScopedCred("s3://bucket/tbl/nested", "1"));
+
+    assertThatThrownBy(
+            () ->
+                CredPropsUtil.createDeltaTableCredProps(
+                    true,
+                    false,
+                    new Configuration(false),
+                    "s3",
+                    null,
+                    "http://uc",
+                    tokenProvider(),
+                    UCDeltaTableIdentifier.of("cat", "sch", "tbl"),
+                    "s3://bucket/tbl",
+                    UCCredentialHadoopConfs.TableOperation.READ_WRITE,
+                    Map.of()))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("credential-scoped filesystem is disabled");
   }
 
   @Test
@@ -1269,11 +1386,30 @@ class CredPropsUtilTest {
   private static GenericCredentialFetcher mockGenericCredentialFetcher(TemporaryCredentials creds) {
     GenericCredentialFetcher api = mock(GenericCredentialFetcher.class);
     try {
-      when(api.createCredential()).thenReturn(new GenericCredential(creds));
+      when(api.createCredentials())
+          .thenReturn(
+              Collections.singletonList(
+                  new GenericStorageCredential(new GenericCredential(creds), null)));
     } catch (Exception e) {
       throw new RuntimeException(e);
     }
     return api;
+  }
+
+  /** A fetcher that vends the given prefix-scoped credentials from {@code createCredentials()}. */
+  private static GenericCredentialFetcher mockMultiCredentialFetcher(
+      GenericStorageCredential... creds) {
+    GenericCredentialFetcher api = mock(GenericCredentialFetcher.class);
+    try {
+      when(api.createCredentials()).thenReturn(Arrays.asList(creds));
+    } catch (Exception e) {
+      throw new RuntimeException(e);
+    }
+    return api;
+  }
+
+  private static GenericStorageCredential s3ScopedCred(String prefix, String id) {
+    return new GenericStorageCredential(new GenericCredential(s3CredsExpiringAt(id, 111L)), prefix);
   }
 
   private static TokenProvider tokenProvider() {

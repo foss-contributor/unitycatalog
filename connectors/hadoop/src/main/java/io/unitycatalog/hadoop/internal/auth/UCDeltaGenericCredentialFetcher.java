@@ -4,10 +4,13 @@ import io.unitycatalog.client.ApiException;
 import io.unitycatalog.client.delta.api.DeltaTemporaryCredentialsApi;
 import io.unitycatalog.client.delta.model.DeltaCredentialOperation;
 import io.unitycatalog.client.delta.model.DeltaCredentialsResponse;
+import io.unitycatalog.client.delta.model.DeltaStorageCredential;
 import io.unitycatalog.client.internal.Preconditions;
 import io.unitycatalog.hadoop.internal.DeltaStorageCredentialUtil;
 import io.unitycatalog.hadoop.internal.UCDeltaTableIdentifier;
 import io.unitycatalog.hadoop.internal.id.DeltaTableCredId;
+import java.util.ArrayList;
+import java.util.List;
 
 /** Adapts the UC Delta temporary credentials SDK API for Hadoop token providers. */
 final class UCDeltaGenericCredentialFetcher implements GenericCredentialFetcher {
@@ -29,7 +32,23 @@ final class UCDeltaGenericCredentialFetcher implements GenericCredentialFetcher 
   }
 
   @Override
-  public GenericCredential createCredential() throws ApiException {
+  public List<GenericStorageCredential> createCredentials() throws ApiException {
+    List<DeltaStorageCredential> storageCreds = fetchResponse().getStorageCredentials();
+    Preconditions.checkArgument(
+        storageCreds != null && !storageCreds.isEmpty(),
+        "UC Delta API response for table '%s' has no storage credentials.",
+        credId.identifier());
+    List<GenericStorageCredential> out = new ArrayList<>(storageCreds.size());
+    for (DeltaStorageCredential storageCred : storageCreds) {
+      out.add(
+          new GenericStorageCredential(
+              new GenericCredential(DeltaStorageCredentialUtil.toTemporaryCredentials(storageCred)),
+              storageCred.getPrefix()));
+    }
+    return out;
+  }
+
+  private DeltaCredentialsResponse fetchResponse() throws ApiException {
     UCDeltaTableIdentifier id = credId.identifier();
     DeltaCredentialsResponse response =
         api.getTableCredentials(operation, id.catalog(), id.schema(), id.table());
@@ -39,9 +58,6 @@ final class UCDeltaGenericCredentialFetcher implements GenericCredentialFetcher 
         id.catalog(),
         id.schema(),
         id.table());
-    return new GenericCredential(
-        DeltaStorageCredentialUtil.toTemporaryCredentials(
-            DeltaStorageCredentialUtil.selectForLocation(
-                credId.location(), response.getStorageCredentials())));
+    return response;
   }
 }

@@ -31,10 +31,6 @@ public class DeltaStagingTableCredId implements CredId {
     return stagingTableId;
   }
 
-  public String location() {
-    return location;
-  }
-
   @Override
   public Map<String, String> props() {
     return Map.of(

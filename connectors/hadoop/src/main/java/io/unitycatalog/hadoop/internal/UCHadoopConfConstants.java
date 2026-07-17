@@ -98,6 +98,26 @@ public class UCHadoopConfConstants {
   public static final String UC_CREDENTIALS_TYPE_TABLE_VALUE = "table";
   public static final String UC_CREDENTIALS_TYPE_PATH_VALUE = "path";
 
+  // Storage location a vended credential applies to. This gets consumed by the renewal provider
+  // to select a single credential when presented multiple. If there are multiple credentials
+  // and this key is not present, the renewal provider will throw an error.
+  public static final String UC_CREDENTIAL_LOCATION_KEY = "fs.unitycatalog.credential.location";
+
+  // Multi-credential (prefix-scoped) keyspace. In the case we have multiple credentials that need
+  // to be serialized AND CredScopedFS is enabled, we write ALL credentials in this keyspace. No
+  // credentials will be written to the top level keys (init credential keys). In the CredScopedFS,
+  // we choose the correct credential in this keyspace based on URI. Then we write the selected
+  // credential as top level keys as if it is a single credential. This effectively converts a
+  // multiple cred conf into a single cred conf identical to the single cred conf serialization
+  // path.
+  //
+  //   <UC_SCOPED_CRED_COUNT_KEY>             = N
+  //   <CredId.props>                         = the request's CredId scope (top level, written once)
+  //   <UC_SCOPED_CRED_PREFIX><i>.<location>  = credential i's location
+  //   <UC_SCOPED_CRED_PREFIX><i>.<init keys> = credential i's cloud value keys
+  public static final String UC_SCOPED_CRED_COUNT_KEY = "fs.unitycatalog.scoped.cred.count";
+  public static final String UC_SCOPED_CRED_PREFIX = "fs.unitycatalog.scoped.cred.";
+
   // Key to enable the credential cache.
   public static final String UC_CREDENTIAL_CACHE_ENABLED_KEY =
       "fs.unitycatalog.credential.cache.enabled";

@@ -7,7 +7,6 @@ import io.unitycatalog.client.model.AwsCredentials;
 import io.unitycatalog.client.model.AzureUserDelegationSAS;
 import io.unitycatalog.client.model.GcpOauthToken;
 import io.unitycatalog.client.model.TemporaryCredentials;
-import java.util.List;
 
 /** Internal utility for UC Delta storage credentials. */
 public final class DeltaStorageCredentialUtil {
@@ -34,50 +33,6 @@ public final class DeltaStorageCredentialUtil {
               .oauthToken(field(config.getGcsOauthToken(), cred, "GCS OAuth token")));
     }
     return out;
-  }
-
-  /** Selects the credential whose prefix covers the requested location. */
-  public static DeltaStorageCredential selectForLocation(
-      String location, List<DeltaStorageCredential> creds) {
-    Preconditions.checkArgument(
-        creds != null && !creds.isEmpty(),
-        "UC Delta API response for '%s' has no storage credentials.",
-        location);
-    if (creds.size() == 1) {
-      Preconditions.checkNotNull(
-          creds.get(0), "UC Delta API response for '%s' contains null.", location);
-    }
-    DeltaStorageCredential best = null;
-    int bestLen = -1;
-    for (DeltaStorageCredential c : creds) {
-      if (c == null || c.getPrefix() == null || !prefixCovers(location, c.getPrefix())) {
-        continue;
-      }
-      int len = stripTrailingSlashes(c.getPrefix()).length();
-      if (len > bestLen) {
-        best = c;
-        bestLen = len;
-      }
-    }
-    Preconditions.checkArgument(
-        best != null, "No UC Delta credential matched location '%s'.", location);
-    return best;
-  }
-
-  static boolean prefixCovers(String location, String prefix) {
-    String l = stripTrailingSlashes(location);
-    String p = stripTrailingSlashes(prefix);
-    return !p.isEmpty() && (l.equals(p) || (l.startsWith(p) && l.charAt(p.length()) == '/'));
-  }
-
-  private static String stripTrailingSlashes(String value) {
-    int end = value.length();
-    int min = value.indexOf("://");
-    min = min >= 0 ? min + 3 : 1;
-    while (end > min && value.charAt(end - 1) == '/') {
-      end--;
-    }
-    return value.substring(0, end);
   }
 
   private static DeltaStorageCredentialConfig requireSingleCloudConfig(

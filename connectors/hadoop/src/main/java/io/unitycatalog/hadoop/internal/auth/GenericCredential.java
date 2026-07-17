@@ -8,13 +8,20 @@ import io.unitycatalog.client.model.TemporaryCredentials;
 import java.util.Objects;
 
 /**
- * Internal credential wrapper used by Hadoop token providers.
+ * Internal credential wrapper used by Hadoop token providers. Right now it holds a temporary
+ * credential but will be refactor to hold plain strings to unity UC REST API and Delta API
+ * responses to an internal data structure.
  *
  * <p>This class normalizes UC SDK temporary credentials into cloud-specific credential values.
  */
 public class GenericCredential {
   private final TemporaryCredentials tempCred;
-
+  /**
+   * Will refactor to String awsAccessKey, String awsSecretKey, String awsSessionToken, String
+   * azureSasToken, String gcsOauthToken. I'm not going to refactor this right now because I know it
+   * will create downstream changes that will bloat the PR (every single call site in providers and
+   * builders needs to be updated).
+   */
   public GenericCredential(TemporaryCredentials tempCred) {
     this.tempCred = tempCred;
   }

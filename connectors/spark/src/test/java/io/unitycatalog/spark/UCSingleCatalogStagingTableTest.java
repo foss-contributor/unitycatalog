@@ -22,8 +22,10 @@ import io.unitycatalog.client.model.TemporaryCredentials;
 import io.unitycatalog.hadoop.internal.CredPropsUtil;
 import io.unitycatalog.hadoop.internal.auth.GenericCredential;
 import io.unitycatalog.hadoop.internal.auth.GenericCredentialFetcher;
+import io.unitycatalog.hadoop.internal.auth.GenericStorageCredential;
 import java.lang.reflect.Field;
 import java.net.URI;
+import java.util.Collections;
 import java.util.Map;
 import org.apache.spark.sql.connector.catalog.Identifier;
 import org.apache.spark.sql.connector.catalog.StagedTable;
@@ -80,10 +82,21 @@ public class UCSingleCatalogStagingTableTest {
     setDelegate(catalog, mockDelegate);
     setField(
         catalog, "tokenProvider", TokenProvider.create(Map.of("type", "static", "token", "tok")));
-    GenericCredentialFetcher mockFetcher = mock(GenericCredentialFetcher.class);
-    when(mockFetcher.createCredential())
-        .thenReturn(new GenericCredential(new TemporaryCredentials()));
+    GenericCredentialFetcher mockFetcher =
+        mockFetcherReturning(new GenericCredential(new TemporaryCredentials()));
     CredPropsUtil.genericCredFetcherFactory = (apiClient, conf) -> mockFetcher;
+  }
+
+  /** Builds a fetcher mock that vends a single credential from {@code createCredentials()}. */
+  private static GenericCredentialFetcher mockFetcherReturning(GenericCredential cred) {
+    GenericCredentialFetcher fetcher = mock(GenericCredentialFetcher.class);
+    try {
+      when(fetcher.createCredentials())
+          .thenReturn(Collections.singletonList(new GenericStorageCredential(cred, null)));
+    } catch (ApiException e) {
+      throw new RuntimeException(e);
+    }
+    return fetcher;
   }
 
   @AfterEach
@@ -163,9 +176,8 @@ public class UCSingleCatalogStagingTableTest {
     // Use a recognized scheme (gs) so the credential fetch path actually runs, then mock the
     // GenericCredentialFetcher factory so the test runs without a real UC server. file:// would
     // short-circuit before any fetch, making the verify() below vacuously true.
-    GenericCredentialFetcher mockCredApi = mock(GenericCredentialFetcher.class);
-    when(mockCredApi.createCredential())
-        .thenReturn(
+    GenericCredentialFetcher mockCredApi =
+        mockFetcherReturning(
             new GenericCredential(
                 new TemporaryCredentials()
                     .gcpOauthToken(new GcpOauthToken().oauthToken("token"))
@@ -187,7 +199,7 @@ public class UCSingleCatalogStagingTableTest {
     ArgumentCaptor<Map<String, String>> propsCaptor = ArgumentCaptor.forClass((Class) Map.class);
 
     verify(mocks.tablesApi).createStagingTable(any(CreateStagingTable.class));
-    verify(mockCredApi).createCredential();
+    verify(mockCredApi).createCredentials();
     verify(mockDelegate).stageCreateOrReplace(eq(IDENT), eq(SCHEMA), any(), propsCaptor.capture());
     assertThat(propsCaptor.getValue())
         .containsEntry(TableCatalog.PROP_LOCATION, "gs://uc-staging/table")
@@ -199,9 +211,8 @@ public class UCSingleCatalogStagingTableTest {
   @Test
   public void testStageCreateOrReplaceMissingManagedTableAutoDefaultsCatalogManagedFeature()
       throws Exception {
-    GenericCredentialFetcher mockCredApi = mock(GenericCredentialFetcher.class);
-    when(mockCredApi.createCredential())
-        .thenReturn(
+    GenericCredentialFetcher mockCredApi =
+        mockFetcherReturning(
             new GenericCredential(
                 new TemporaryCredentials()
                     .gcpOauthToken(new GcpOauthToken().oauthToken("token"))
@@ -262,9 +273,8 @@ public class UCSingleCatalogStagingTableTest {
   @Test
   public void testStageCreateMissingManagedTableAutoDefaultsCatalogManagedFeature()
       throws Exception {
-    GenericCredentialFetcher mockCredApi = mock(GenericCredentialFetcher.class);
-    when(mockCredApi.createCredential())
-        .thenReturn(
+    GenericCredentialFetcher mockCredApi =
+        mockFetcherReturning(
             new GenericCredential(
                 new TemporaryCredentials()
                     .gcpOauthToken(new GcpOauthToken().oauthToken("token"))
